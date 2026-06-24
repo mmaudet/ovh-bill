@@ -100,8 +100,15 @@ function classifyService(description) {
  * telecom, web_cloud, ip_service, storage, support, dedicated_server, domain,
  * license, backup, load_balancer, vps, cloud_project, other.
  */
-function classifyResourceTypeFromDomain(domain) {
+function classifyResourceTypeFromDomain(domain, description = '') {
   if (!domain) return 'other';
+
+  const desc = (description || '').toLowerCase();
+
+  // Cloud Disk Array uses a UUID domain (same shape as licenses below), so it
+  // can only be disambiguated by its description. Resolve it to storage before
+  // the generic UUID -> license rule catches it.
+  if (desc.includes('cloud disk array')) return 'storage';
 
   // Private Cloud Management Fee: pcc-.../managementfee
   if (/^pcc-[^/]+\/managementfee$/.test(domain)) return 'private_cloud';

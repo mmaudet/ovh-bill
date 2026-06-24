@@ -2,7 +2,7 @@
  * Tests for service classification function
  */
 
-const { classifyService } = require('../data/classify');
+const { classifyService, classifyResourceTypeFromDomain } = require('../data/classify');
 
 describe('classifyService', () => {
   describe('Compute classification', () => {
@@ -199,6 +199,37 @@ describe('classifyService', () => {
       expect(classifyService('')).toBe('Other');
       expect(classifyService(null)).toBe('Other');
       expect(classifyService(undefined)).toBe('Other');
+    });
+  });
+});
+
+describe('classifyResourceTypeFromDomain', () => {
+  const UUID = '330202de-7481-44f3-a2c8-097532da59bf';
+
+  describe('Cloud Disk Array disambiguation', () => {
+    test('classifies Cloud Disk Array as storage despite its UUID domain', () => {
+      expect(classifyResourceTypeFromDomain(UUID, 'Cloud Disk Array storage 2TB – 1 month')).toBe('storage');
+      expect(classifyResourceTypeFromDomain(UUID, 'Cloud Disk Array storage 2TB – 1 month au prorata : 27 jours')).toBe('storage');
+      expect(classifyResourceTypeFromDomain(UUID, 'Cloud Disk Array storage 2TB – installation')).toBe('storage');
+    });
+
+    test('still classifies genuine UUID-domain licenses as license', () => {
+      expect(classifyResourceTypeFromDomain(UUID, 'Windows Server 2019 License')).toBe('license');
+      expect(classifyResourceTypeFromDomain(UUID, '')).toBe('license');
+      expect(classifyResourceTypeFromDomain(UUID)).toBe('license');
+    });
+  });
+
+  describe('other resource types still resolve', () => {
+    test('dedicated server, vps, cloud project', () => {
+      expect(classifyResourceTypeFromDomain('ns3145678.ip-1-2-3.eu')).toBe('dedicated_server');
+      expect(classifyResourceTypeFromDomain('vps-abc123')).toBe('vps');
+      expect(classifyResourceTypeFromDomain('0123456789abcdef0123456789abcdef')).toBe('cloud_project');
+    });
+
+    test('null/empty domain falls back to other', () => {
+      expect(classifyResourceTypeFromDomain('')).toBe('other');
+      expect(classifyResourceTypeFromDomain(null)).toBe('other');
     });
   });
 });

@@ -28,6 +28,16 @@ const formatCurrency = (value, language = 'fr') => {
   }).format(value);
 };
 
+// Format a 'YYYY-MM' string into a localized "short month + year" label.
+// Localization belongs on the client; the API sends the raw yearMonth.
+const formatYearMonth = (yearMonth, language = 'fr') => {
+  if (!yearMonth) return '';
+  const [year, month] = yearMonth.split('-').map(Number);
+  if (!year || !month) return yearMonth;
+  const locale = language === 'en' ? 'en-US' : 'fr-FR';
+  return new Date(year, month - 1, 1).toLocaleDateString(locale, { month: 'short', year: 'numeric' });
+};
+
 // Generate markdown report
 const generateMarkdownReport = (summary, byService, byProject, selectedMonth, language = 'fr') => {
   const locale = language === 'en' ? 'en-US' : 'fr-FR';
@@ -1318,9 +1328,9 @@ export default function Dashboard() {
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={monthlyTrend}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month" />
+                      <XAxis dataKey="yearMonth" tickFormatter={(ym) => formatYearMonth(ym, language)} />
                       <YAxis tickFormatter={(v) => `${v}€`} />
-                      <Tooltip formatter={(v) => `${fmt(v)}€`} />
+                      <Tooltip labelFormatter={(ym) => formatYearMonth(ym, language)} formatter={(v) => `${fmt(v)}€`} />
                       <Line
                         type="monotone"
                         dataKey="cost"
@@ -1378,7 +1388,7 @@ export default function Dashboard() {
                 <span className="text-gray-500 text-sm">{t('mostExpensiveMonth')}</span>
                 <div className={`text-3xl font-bold mt-2 ${monthlyTrend.length > 0 ? 'text-red-600' : 'text-gray-400'}`}>
                   {monthlyTrend.length > 0
-                    ? monthlyTrend.reduce((max, m) => m.cost > max.cost ? m : max, monthlyTrend[0]).month
+                    ? formatYearMonth(monthlyTrend.reduce((max, m) => m.cost > max.cost ? m : max, monthlyTrend[0]).yearMonth, language)
                     : 'N/A'}
                 </div>
                 <p className="text-sm text-gray-500 mt-1">

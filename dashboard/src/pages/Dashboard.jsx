@@ -1,5 +1,5 @@
 import { useState, useEffect, Fragment } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line, Legend
@@ -12,7 +12,7 @@ import {
   fetchInventoryVps, fetchInventoryStorage, fetchExpiringServices,
   fetchByResourceType, fetchResourceTypeDetails, fetchProjectsEnriched, fetchProjectConsumption,
   fetchProjectInstances, fetchProjectQuotas, fetchGpuSummary, fetchPublicCloudStats, fetchBackupStats,
-  fetchProjectBuckets, fetchProjectInstanceTotal
+  fetchProjectBuckets, fetchProjectInstanceTotal, triggerImport
 } from '../services/api';
 import { useLanguage } from '../hooks/useLanguage.jsx';
 import Logo from '../components/Logo';
@@ -271,6 +271,25 @@ export default function Dashboard() {
     queryFn: fetchImportStatus
   });
 
+  // Manual resync
+  const queryClient = useQueryClient();
+  const [syncFeedback, setSyncFeedback] = useState(null); // { type: 'ok'|'error', msg }
+  const resync = useMutation({
+    mutationFn: triggerImport,
+    onSuccess: () => {
+      setSyncFeedback({ type: 'ok', msg: t('syncStarted') });
+      // The import runs in the background; refresh status a bit later.
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['importStatus'] }), 8000);
+    },
+    onError: (err) => {
+      const status = err?.response?.status;
+      const key = status === 429 ? 'syncRateLimited'
+        : status === 409 ? 'syncRunning'
+        : 'syncError';
+      setSyncFeedback({ type: 'error', msg: t(key) });
+    }
+  });
+
   // Phase 1: Consumption data
   const { data: consumptionCurrent } = useQuery({
     queryKey: ['consumptionCurrent'],
@@ -474,6 +493,20 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {/* Manual resync */}
+            <button
+              onClick={() => { setSyncFeedback(null); resync.mutate(); }}
+              disabled={resync.isPending}
+              title={t('resync')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                resync.isPending
+                  ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                  : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50 cursor-pointer'
+              }`}
+            >
+              <span className={resync.isPending ? 'animate-spin' : ''}>⟳</span>
+              <span>{resync.isPending ? t('syncing') : t('resync')}</span>
+            </button>
             {/* Expiration badge */}
             {expiringServices.length > 0 && (
               <div className="flex items-center gap-1 px-3 py-1.5 bg-orange-100 text-orange-700 rounded-lg text-sm font-medium">
@@ -1968,6 +2001,11 @@ export default function Dashboard() {
 
         {/* Footer */}
         <div className="text-center text-sm text-gray-400 pt-4 pb-2">
+          {syncFeedback && (
+            <p className={`mb-2 text-sm font-medium ${syncFeedback.type === 'ok' ? 'text-green-600' : 'text-red-600'}`}>
+              {syncFeedback.msg}
+            </p>
+          )}
           <p>{t('syncedVia')}</p>
           {importStatus?.latest && (
             <p className="mt-1">
@@ -1975,6 +2013,47 @@ export default function Dashboard() {
               ({importStatus.latest.bills_imported} {t('bills')})
             </p>
           )}
+
+          {/* Import history */}
+          <details className="mt-3 max-w-2xl mx-auto text-left">
+            <summary className="cursor-pointer text-gray-500 hover:text-gray-700 text-center">
+              {t('importHistory')}
+            </summary>
+            {importStatus?.history?.length > 0 ? (
+              <table className="w-full mt-2 text-xs border-collapse">
+                <thead>
+                  <tr className="text-gray-500 border-b border-gray-200">
+                    <th className="text-left py-1 px-2">{t('importDate')}</th>
+                    <th className="text-left py-1 px-2">{t('importType')}</th>
+                    <th className="text-left py-1 px-2">{t('importStatusLabel')}</th>
+                    <th className="text-right py-1 px-2">{t('importBills')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {importStatus.history.map((h) => (
+                    <tr key={h.id} className="border-b border-gray-100">
+                      <td className="py-1 px-2 text-gray-600">
+                        {new Date(h.completed_at || h.started_at).toLocaleString(locale)}
+                      </td>
+                      <td className="py-1 px-2 text-gray-600">{h.type}</td>
+                      <td className="py-1 px-2">
+                        <span className={
+                          h.status === 'success' ? 'text-green-600'
+                          : h.status === 'running' ? 'text-blue-600'
+                          : 'text-red-600'
+                        }>
+                          {h.status}
+                        </span>
+                      </td>
+                      <td className="py-1 px-2 text-right text-gray-600">{h.bills_imported ?? '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="mt-2 text-center text-gray-400">{t('noImportHistory')}</p>
+            )}
+          </details>
         </div>
       </div>
     </div>

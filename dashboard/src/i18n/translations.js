@@ -75,6 +75,20 @@ export const translations = {
     syncWarningDays: 'jours',
     syncWarningAction: 'Exécutez',
     syncWarningToUpdate: 'pour mettre à jour.',
+
+    // Manual resync
+    resync: 'Synchroniser',
+    syncing: 'Synchronisation...',
+    syncStarted: 'Synchronisation lancée. Les données se mettront à jour dans quelques instants.',
+    syncRateLimited: 'Synchronisation limitée à une fois par heure. Réessayez plus tard.',
+    syncRunning: 'Une synchronisation est déjà en cours.',
+    syncError: 'Échec du déclenchement de la synchronisation.',
+    importHistory: 'Historique des imports',
+    importDate: 'Date',
+    importType: 'Type',
+    importStatusLabel: 'Statut',
+    importBills: 'Factures',
+    noImportHistory: 'Aucun import enregistré',
     dismiss: 'Fermer',
 
     // Consumption (Phase 1)
@@ -222,6 +236,20 @@ export const translations = {
     syncWarningDays: 'days ago',
     syncWarningAction: 'Run',
     syncWarningToUpdate: 'to update.',
+
+    // Manual resync
+    resync: 'Resync',
+    syncing: 'Syncing...',
+    syncStarted: 'Sync started. Data will refresh shortly.',
+    syncRateLimited: 'Resync is limited to once per hour. Try again later.',
+    syncRunning: 'A sync is already running.',
+    syncError: 'Failed to trigger the sync.',
+    importHistory: 'Import history',
+    importDate: 'Date',
+    importType: 'Type',
+    importStatusLabel: 'Status',
+    importBills: 'Bills',
+    noImportHistory: 'No import recorded',
     dismiss: 'Dismiss',
 
     // Consumption (Phase 1)

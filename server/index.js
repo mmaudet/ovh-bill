@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { spawn } = require('child_process');
 
 // Import database module from data workspace
 const db = require('../data/db');
@@ -142,6 +143,20 @@ const authLimiter = rateLimit({
   message: { error: 'Too many authentication attempts, please try again later' },
   standardHeaders: true,
   legacyHeaders: false
+});
+
+// Manual import trigger: hard-capped at one run per hour for everyone (shared
+// global bucket, not per-IP) to protect the OVH API. This is a functional
+// safeguard, applied even when the DoS rate limiting is disabled.
+// Note: in-memory window, so it resets if the server restarts.
+const importLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 1,
+  message: { error: 'syncRateLimited' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: () => 'global-manual-import',
+  validate: false
 });
 
 // Trust proxy headers (for reverse proxy/load balancer)
@@ -615,6 +630,36 @@ function registerRoutes() {
         latest,
         history: all
       });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Manual resync: spawn a differential import in the background.
+  // Rate-limited to once per hour (importLimiter) and guarded against
+  // overlapping a run already in progress.
+  app.post('/api/import/run', importLimiter, (req, res) => {
+    try {
+      const latest = db.importLog.getLatest();
+      if (latest && latest.status === 'running') {
+        // Block only if the running entry is recent, so a crashed import that
+        // never wrote a terminal status does not lock the feature forever.
+        const startedMs = new Date(latest.started_at).getTime();
+        if (!Number.isNaN(startedMs) && Date.now() - startedMs < 30 * 60 * 1000) {
+          return res.status(409).json({ error: 'syncRunning' });
+        }
+      }
+
+      const importScript = path.resolve(__dirname, '..', 'data', 'import.js');
+      const child = spawn(process.execPath, [importScript, '--diff', '--all'], {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env
+      });
+      child.on('error', (err) => console.error('Manual import spawn failed:', err.message));
+      child.unref();
+
+      res.status(202).json({ started: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

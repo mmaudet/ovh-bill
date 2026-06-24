@@ -68,6 +68,12 @@ export const fetchImportStatus = async () => {
   return data;
 };
 
+// Trigger a manual resync (differential import). Server caps this at once per hour.
+export const triggerImport = async () => {
+  const { data } = await api.post('/import/run');
+  return data;
+};
+
 export const fetchConfig = async () => {
   const { data } = await api.get('/config');
   return data;

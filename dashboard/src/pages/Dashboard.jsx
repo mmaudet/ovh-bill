@@ -12,7 +12,7 @@ import {
   fetchInventoryVps, fetchInventoryStorage, fetchExpiringServices,
   fetchByResourceType, fetchResourceTypeDetails, fetchProjectsEnriched, fetchProjectConsumption,
   fetchProjectInstances, fetchProjectQuotas, fetchGpuSummary, fetchPublicCloudStats, fetchBackupStats,
-  fetchProjectBuckets, fetchProjectInstanceTotal, triggerImport
+  fetchProjectBuckets, fetchProjectInstanceTotal, triggerImport, fetchMonthlyTrendByCategory
 } from '../services/api';
 import { useLanguage } from '../hooks/useLanguage.jsx';
 import Logo from '../components/Logo';
@@ -36,6 +36,30 @@ const formatYearMonth = (yearMonth, language = 'fr') => {
   if (!year || !month) return yearMonth;
   const locale = language === 'en' ? 'en-US' : 'fr-FR';
   return new Date(year, month - 1, 1).toLocaleDateString(locale, { month: 'short', year: 'numeric' });
+};
+
+// Trend period options, expressed in months. The largest offered option is
+// derived from the oldest available month so users can never pick a range
+// emptier than their data.
+const PERIOD_OPTIONS = [
+  { months: 3, key: 'period3m' },
+  { months: 6, key: 'period6m' },
+  { months: 12, key: 'period1y' },
+  { months: 24, key: 'period2y' },
+  { months: 36, key: 'period3y' },
+  { months: 60, key: 'period5y' },
+  { months: 120, key: 'period10y' },
+  { months: 180, key: 'period15y' },
+  { months: 240, key: 'period20y' }
+];
+
+// Number of months from a 'YYYY-MM' up to the current month, inclusive.
+const monthsSince = (yearMonth) => {
+  if (!yearMonth) return 0;
+  const [y, m] = yearMonth.split('-').map(Number);
+  if (!y || !m) return 0;
+  const now = new Date();
+  return (now.getFullYear() - y) * 12 + (now.getMonth() + 1 - m) + 1;
 };
 
 // Generate markdown report
@@ -182,6 +206,19 @@ export default function Dashboard() {
     queryFn: fetchMonths
   });
 
+  // Trend periods available given how far back the data goes. Offer every
+  // predefined step up to (and including) the first one that covers all data.
+  const maxMonths = months.length > 0 ? monthsSince(months[months.length - 1].value) : 0;
+  const availablePeriods = (() => {
+    const out = [];
+    for (const opt of PERIOD_OPTIONS) {
+      out.push(opt);
+      if (opt.months >= maxMonths) break;
+    }
+    return out.length > 0 ? out : [PERIOD_OPTIONS[0]];
+  })();
+  const currentPeriodLabel = (availablePeriods.find(o => o.months === trendPeriod) || {}).key;
+
   // Set default months when data loads
   useEffect(() => {
     if (months.length > 0 && !selectedMonth) {
@@ -196,12 +233,9 @@ export default function Dashboard() {
         setCompareMonthB(months[0]);
       }
     }
-    // Adjust trend period if it exceeds available data
-    if (months.length > 0 && trendPeriod > months.length) {
-      const validPeriods = [3, 6, 12, 24, 36].filter(p => p <= months.length);
-      if (validPeriods.length > 0) {
-        setTrendPeriod(validPeriods[validPeriods.length - 1]);
-      }
+    // Adjust trend period if it is no longer one of the available options
+    if (months.length > 0 && !availablePeriods.some(o => o.months === trendPeriod)) {
+      setTrendPeriod(availablePeriods[availablePeriods.length - 1].months);
     }
   }, [months, selectedMonth, trendPeriod]);
 
@@ -227,6 +261,18 @@ export default function Dashboard() {
   const { data: monthlyTrend = [] } = useQuery({
     queryKey: ['monthlyTrend', trendPeriod],
     queryFn: () => fetchMonthlyTrend(trendPeriod)
+  });
+
+  const { data: trendByCategory = { categories: [], data: [] } } = useQuery({
+    queryKey: ['monthlyTrendByCategory', trendPeriod],
+    queryFn: () => fetchMonthlyTrendByCategory(trendPeriod)
+  });
+  // Categories hidden from the by-category chart (toggled via the legend).
+  const [hiddenCategories, setHiddenCategories] = useState(() => new Set());
+  const toggleCategory = (key) => setHiddenCategories(prev => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
   });
 
   // Comparison data
@@ -719,11 +765,9 @@ export default function Dashboard() {
                 onChange={(e) => setTrendPeriod(Number(e.target.value))}
                 className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm shadow-sm cursor-pointer"
               >
-                {months.length >= 3 && <option value={3}>{t('months3')}</option>}
-                {months.length >= 6 && <option value={6}>{t('months6')}</option>}
-                {months.length >= 12 && <option value={12}>{t('months12')}</option>}
-                {months.length >= 24 && <option value={24}>{t('months24')}</option>}
-                {months.length >= 36 && <option value={36}>{t('months36')}</option>}
+                {availablePeriods.map(opt => (
+                  <option key={opt.months} value={opt.months}>{t(opt.key)}</option>
+                ))}
               </select>
             </div>
           )}
@@ -1355,7 +1399,7 @@ export default function Dashboard() {
         {activeTab === 'trends' && (
           <div className="space-y-6">
             <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
-              <h3 className="font-semibold text-gray-900 mb-4">{t('evolutionOver')} {trendPeriod} {language === 'en' ? 'months' : 'mois'}</h3>
+              <h3 className="font-semibold text-gray-900 mb-4">{t('costEvolutionTotal')}</h3>
               {monthlyTrend.length > 0 ? (
                 <div className="h-72">
                   <ResponsiveContainer width="100%" height="100%">
@@ -1375,6 +1419,67 @@ export default function Dashboard() {
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
+              ) : (
+                <div className="h-72 flex items-center justify-center text-gray-400">
+                  <p>{t('noDataAvailable')}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Cost trend by category */}
+            <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+              <h3 className="font-semibold text-gray-900 mb-4">{t('trendByCategory')}</h3>
+              {trendByCategory.data.length > 0 && trendByCategory.categories.length > 0 ? (
+                <>
+                  {/* Clickable legend: toggle categories to hide/show (Y axis rescales) */}
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    {trendByCategory.categories.map((c) => {
+                      const hidden = hiddenCategories.has(c.key);
+                      return (
+                        <button
+                          key={c.key}
+                          onClick={() => toggleCategory(c.key)}
+                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors cursor-pointer ${
+                            hidden ? 'bg-gray-50 text-gray-400 border-gray-200' : 'bg-white text-gray-700 border-gray-300'
+                          }`}
+                        >
+                          <span
+                            className="inline-block w-3 h-3 rounded-full"
+                            style={{ backgroundColor: hidden ? '#d1d5db' : c.color }}
+                          />
+                          {c.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="h-96">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={trendByCategory.data}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="yearMonth" tickFormatter={(ym) => formatYearMonth(ym, language)} />
+                        <YAxis tickFormatter={(v) => `${v}€`} />
+                        <Tooltip
+                          labelFormatter={(ym) => formatYearMonth(ym, language)}
+                          formatter={(v, name) => [`${fmt(v)}€`, name]}
+                        />
+                        {trendByCategory.categories
+                          .filter((c) => !hiddenCategories.has(c.key))
+                          .map((c) => (
+                            <Line
+                              key={c.key}
+                              type="monotone"
+                              dataKey={c.key}
+                              name={c.label}
+                              stroke={c.color}
+                              strokeWidth={2}
+                              dot={false}
+                              activeDot={{ r: 5 }}
+                            />
+                          ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
               ) : (
                 <div className="h-72 flex items-center justify-center text-gray-400">
                   <p>{t('noDataAvailable')}</p>
@@ -1415,7 +1520,7 @@ export default function Dashboard() {
                     ? `${(((monthlyTrend[monthlyTrend.length - 1]?.cost - monthlyTrend[0]?.cost) / monthlyTrend[0]?.cost) * 100) > 0 ? '+' : ''}${(((monthlyTrend[monthlyTrend.length - 1]?.cost - monthlyTrend[0]?.cost) / monthlyTrend[0]?.cost) * 100).toFixed(1)}%`
                     : 'N/A'}
                 </div>
-                <p className="text-sm text-gray-500 mt-1">{t('overLast')} {trendPeriod} {t('lastMonths')}</p>
+                <p className="text-sm text-gray-500 mt-1">{t('overLast')} {currentPeriodLabel ? t(currentPeriodLabel) : `${trendPeriod} ${t('lastMonths')}`}</p>
               </div>
               <div className={`bg-white rounded-xl p-5 shadow-sm border border-gray-100 ${monthlyTrend.length === 0 ? 'opacity-50' : ''}`}>
                 <span className="text-gray-500 text-sm">{t('mostExpensiveMonth')}</span>

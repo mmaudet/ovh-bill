@@ -159,6 +159,48 @@ const importLimiter = rateLimit({
   validate: false
 });
 
+// Shared resource-type presentation (used by by-resource-type and the
+// monthly-trend-by-category endpoints).
+const RESOURCE_TYPE_COLORS = {
+  'cloud_project': '#3b82f6',
+  'dedicated_server': '#ef4444',
+  'vps': '#f59e0b',
+  'storage': '#10b981',
+  'load_balancer': '#06b6d4',
+  'domain': '#8b5cf6',
+  'ip_service': '#ec4899',
+  'telephony': '#f97316',
+  'private_cloud': '#7c3aed',
+  'private_cloud_host': '#9333ea',
+  'private_cloud_datastore': '#a855f7',
+  'license': '#0891b2',
+  'backup': '#059669',
+  'support': '#64748b',
+  'telecom': '#d97706',
+  'web_cloud': '#2563eb',
+  'other': '#6b7280'
+};
+
+const RESOURCE_TYPE_LABELS = {
+  'cloud_project': 'Public Cloud',
+  'dedicated_server': 'Dedicated Servers',
+  'vps': 'VPS',
+  'storage': 'Storage',
+  'load_balancer': 'Load Balancers',
+  'domain': 'Domains',
+  'ip_service': 'IP',
+  'telephony': 'Telephony',
+  'private_cloud': 'Private Cloud',
+  'private_cloud_host': 'Private Cloud Hosts',
+  'private_cloud_datastore': 'Private Cloud Datastores',
+  'license': 'Licenses',
+  'backup': 'Backup',
+  'support': 'Support',
+  'telecom': 'Telecom',
+  'web_cloud': 'Web Cloud',
+  'other': 'Other'
+};
+
 // Trust proxy headers (for reverse proxy/load balancer)
 if (rateLimitConfig.trustProxy) {
   app.set('trust proxy', 1);
@@ -571,6 +613,48 @@ function registerRoutes() {
       });
 
       res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Monthly trend broken down by resource type, shaped for a multi-line chart:
+  // { categories: [{key, label, color}], data: [{ yearMonth, <key>: total, ... }] }
+  app.get('/api/analysis/monthly-trend-by-category', (req, res) => {
+    try {
+      const months = parseInt(req.query.months) || 6;
+      const rows = db.analysis.monthlyTrendByResourceType(months);
+
+      // Total per resource_type to order categories by spend.
+      const totals = {};
+      const monthsSet = new Set();
+      for (const r of rows) {
+        totals[r.resource_type] = (totals[r.resource_type] || 0) + r.total;
+        monthsSet.add(r.month);
+      }
+
+      const categories = Object.keys(totals)
+        .sort((a, b) => totals[b] - totals[a])
+        .map(key => ({
+          key,
+          label: RESOURCE_TYPE_LABELS[key] || key,
+          color: RESOURCE_TYPE_COLORS[key] || RESOURCE_TYPE_COLORS['other']
+        }));
+
+      // One row per month with every category present (0 when absent) so lines
+      // stay continuous.
+      const byMonth = {};
+      for (const ym of monthsSet) {
+        byMonth[ym] = { yearMonth: ym };
+        for (const c of categories) byMonth[ym][c.key] = 0;
+      }
+      for (const r of rows) {
+        byMonth[r.month][r.resource_type] = Math.round(r.total * 100) / 100;
+      }
+
+      const data = Object.values(byMonth).sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
+
+      res.json({ categories, data });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1104,45 +1188,11 @@ function registerRoutes() {
 
       const data = db.inventory.byResourceType(from, to);
 
-      const colors = {
-        'cloud_project': '#3b82f6',
-        'dedicated_server': '#ef4444',
-        'vps': '#f59e0b',
-        'storage': '#10b981',
-        'load_balancer': '#06b6d4',
-        'domain': '#8b5cf6',
-        'ip_service': '#ec4899',
-        'telephony': '#f97316',
-        'private_cloud': '#7c3aed',
-        'private_cloud_host': '#9333ea',
-        'private_cloud_datastore': '#a855f7',
-        'license': '#0891b2',
-        'backup': '#059669',
-        'other': '#6b7280'
-      };
-
-      const labels = {
-        'cloud_project': 'Public Cloud',
-        'dedicated_server': 'Dedicated Servers',
-        'vps': 'VPS',
-        'storage': 'Storage',
-        'load_balancer': 'Load Balancers',
-        'domain': 'Domains',
-        'ip_service': 'IP',
-        'telephony': 'Telephony',
-        'private_cloud': 'Private Cloud',
-        'private_cloud_host': 'Private Cloud Hosts',
-        'private_cloud_datastore': 'Private Cloud Datastores',
-        'license': 'Licenses',
-        'backup': 'Backup',
-        'other': 'Other'
-      };
-
       const result = data.map(row => ({
-        name: labels[row.resource_type] || row.resource_type || 'Other',
+        name: RESOURCE_TYPE_LABELS[row.resource_type] || row.resource_type || 'Other',
         resource_type: row.resource_type || 'other',
         value: Math.round(row.total * 100) / 100,
-        color: colors[row.resource_type] || colors['other'],
+        color: RESOURCE_TYPE_COLORS[row.resource_type] || RESOURCE_TYPE_COLORS['other'],
         detailsCount: row.details_count,
         serviceCount: row.service_count
       }));

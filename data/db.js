@@ -438,6 +438,21 @@ const analysisOps = {
     `).all(months);
   },
 
+  monthlyTrendByResourceType: (months = 6) => {
+    const db = getDb();
+    return db.prepare(`
+      SELECT
+        strftime('%Y-%m', b.date) as month,
+        COALESCE(d.resource_type, 'other') as resource_type,
+        SUM(d.total_price) as total
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE b.date >= date('now', 'start of month', '-' || ? || ' months')
+      GROUP BY strftime('%Y-%m', b.date), COALESCE(d.resource_type, 'other')
+      ORDER BY month
+    `).all(months);
+  },
+
   summary: (fromDate, toDate) => {
     const db = getDb();
 

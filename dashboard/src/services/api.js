@@ -63,8 +63,19 @@ export const fetchMonthlyTrend = async (months = 6) => {
   return data;
 };
 
+export const fetchMonthlyTrendByCategory = async (months = 6) => {
+  const { data } = await api.get('/analysis/monthly-trend-by-category', { params: { months } });
+  return data;
+};
+
 export const fetchImportStatus = async () => {
   const { data } = await api.get('/import/status');
+  return data;
+};
+
+// Trigger a manual resync (differential import). Server caps this at once per hour.
+export const triggerImport = async () => {
+  const { data } = await api.post('/import/run');
   return data;
 };
 

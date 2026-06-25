@@ -932,7 +932,7 @@ async function runImport(params) {
             if (resourceTypeMap && resourceTypeMap[d.domain]) {
               resource_type = resourceTypeMap[d.domain];
             } else {
-              resource_type = classifyResourceTypeFromDomain(d.domain);
+              resource_type = classifyResourceTypeFromDomain(d.domain, d.description);
             }
             // Projet cloud
             const isCloudProject = projectMap.hasOwnProperty(d.domain);

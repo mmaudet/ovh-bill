@@ -26,14 +26,16 @@ services:
       - NODE_ENV=production
       - AUTH_REQUIRED=${AUTH_REQUIRED:-false}
       - PORT=3001
-      # DATA_DIR=/app/data (default - change to use custom database location)
+      # Database lives in a dedicated dir mounted as a volume, kept separate
+      # from the application code under /app/data (which ships in the image).
+      - DATA_DIR=/data
       - IMPORT_ENABLED=${IMPORT_ENABLED:-true}
       - IMPORT_INTERVAL=${IMPORT_INTERVAL:-86400}
       - IMPORT_FLAGS=${IMPORT_FLAGS:---all}
     ports:
       - "${OCM_PORT:-3001}:3001"
     volumes:
-      - ocm-data:/app/data
+      - ocm-data:/data
       - ./config.json:/app/config.json:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/api/health"]

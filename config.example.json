@@ -5,7 +5,7 @@
     "consumerKey": "YOUR_CONSUMER_KEY",
     "endpoint": "ovh-eu"
   },
-  "dataDir": "/app/data",
+  "dataDir": "/data",
   "dashboard": {
     "budget": 50000,
     "currency": "EUR",

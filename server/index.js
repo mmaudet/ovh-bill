@@ -130,8 +130,10 @@ const apiLimiter = rateLimit({
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
   legacyHeaders: false, // Disable `X-RateLimit-*` headers
   skip: (req) => {
-    // Skip rate limiting for health checks
-    return req.path === '/api/health';
+    // Skip rate limiting for health checks. Use originalUrl: this limiter is
+    // mounted on '/api/', so req.path here is '/health' (prefix stripped),
+    // which made the previous '/api/health' check never match.
+    return (req.originalUrl || req.url).split('?')[0] === '/api/health';
   }
 });
 

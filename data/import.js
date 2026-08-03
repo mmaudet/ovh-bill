@@ -778,6 +778,36 @@ async function fetchObjectStorageBuckets(projectId) {
     }
   });
 
+  // Swift containers (Public Cloud Archive and plain object storage). Different
+  // product, different route, and the list endpoint leaves `archive` null: only
+  // the detail call tells a cold archive container from a regular one.
+  try {
+    const containers = await withRetry(() => ovh.requestPromised('GET', `/cloud/project/${projectId}/storage`));
+    await runInBatches(containers || [], async (container) => {
+      let detail = null;
+      try {
+        detail = await ovh.requestPromised('GET', `/cloud/project/${projectId}/storage/${container.id}`);
+      } catch (err) {
+        // keep the list entry, just without the archive flag
+      }
+      const isArchive = (detail?.archive ?? container.archive) === true;
+      buckets.push({
+        id: `${projectId}:${container.region}:swift:${container.name}`,
+        project_id: projectId,
+        name: container.name,
+        region: container.region || '',
+        storage_class: isArchive ? 'Public Cloud Archive' : 'Swift',
+        status: null,
+        objects_count: container.storedObjects ?? null,
+        objects_size: container.storedBytes ?? null,
+        created_at: null
+      });
+    });
+    console.log(`    ${(containers || []).length} swift containers`);
+  } catch (err) {
+    console.error(`    Error fetching swift containers: ${err.message}`);
+  }
+
   return buckets;
 }
 

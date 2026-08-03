@@ -1082,6 +1082,49 @@ function allocateColdArchive(db, rows, projectId, fromDate, toDate) {
   allocateProRata(archived, coldArchiveTotal, r => r.objects_size);
 }
 
+/**
+ * Spread the aggregated "Public Cloud Archive (region gra)" bill lines over the
+ * Swift containers of that region, pro rata of their stored volume.
+ *
+ * Same shape as Cold Archive: the line carries a region, never a container
+ * name. Verified on a live account: the billed quantity divided by the hours in
+ * the month equals the summed container size to the GiB.
+ */
+function allocateSwiftArchive(db, rows, projectId, fromDate, toDate) {
+  const lines = db.prepare(`
+    SELECT d.description as description, ROUND(SUM(d.total_price), 2) as total
+    FROM bill_details d
+    JOIN bills b ON d.bill_id = b.id
+    WHERE d.project_id = ?
+      AND b.date >= ? AND b.date <= ?
+      AND LOWER(d.description) LIKE 'public cloud archive (region%'
+    GROUP BY d.description
+  `).all(projectId, fromDate, toDate);
+
+  for (const line of lines) {
+    const region = (line.description.match(/region\s+([^)]+)\)/i)?.[1] || '').trim().toLowerCase();
+    const matching = rows.filter(r =>
+      r.storage_class === 'Public Cloud Archive' &&
+      (r.region || '').toLowerCase() === region &&
+      r.objects_size > 0
+    );
+    if (!allocateProRata(matching, line.total, r => r.objects_size)) {
+      rows.push({
+        name: line.description,
+        region: region || null,
+        storage_class: 'Public Cloud Archive',
+        status: null,
+        objects_count: null,
+        objects_size: null,
+        created_at: null,
+        total: line.total,
+        in_inventory: 0,
+        allocated: true
+      });
+    }
+  }
+}
+
 // Cloud detail operations (Phase 4)
 const cloudDetailOps = {
   insertConsumption: (entry) => {
@@ -1257,6 +1300,7 @@ const cloudDetailOps = {
     }
 
     allocateColdArchive(db, rows, projectId, fromDate, toDate);
+    allocateSwiftArchive(db, rows, projectId, fromDate, toDate);
 
     return rows.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
   },

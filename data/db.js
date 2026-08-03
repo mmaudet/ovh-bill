@@ -737,7 +737,10 @@ const inventoryOps = {
     // Count object storage buckets from the imported inventory (buckets that exist
     // right now, including the ones that cost nothing over the period). Falls back
     // to the billing-derived count when the inventory has never been imported.
-    let s3 = db.prepare('SELECT COUNT(*) as count FROM object_storage_buckets').get();
+    let s3 = db.prepare(`
+      SELECT COUNT(*) as count FROM object_storage_buckets
+      WHERE created_at IS NULL OR SUBSTR(created_at, 1, 10) <= ?
+    `).get(toDate);
     if (!s3?.count) {
       s3 = db.prepare(`
         SELECT COUNT(*) as count
@@ -990,11 +993,16 @@ const cloudDetailOps = {
   getBucketsByProject: (projectId, fromDate, toDate) => {
     const db = getDb();
 
+    // A bucket created after the period did not exist then, so it must not show
+    // up on an older month. Compare on the date part only, the inventory stores
+    // a full ISO timestamp. A bucket billed over the period but filtered out
+    // here still surfaces through the "billed but not in inventory" path below.
     const inventory = db.prepare(`
       SELECT name, region, storage_class, status, objects_count, objects_size, created_at
       FROM object_storage_buckets
       WHERE project_id = ?
-    `).all(projectId);
+        AND (created_at IS NULL OR SUBSTR(created_at, 1, 10) <= ?)
+    `).all(projectId, toDate);
 
     // ' sur la région ' is 15 characters, '- Bucket ' is 9
     const costs = db.prepare(`

@@ -1220,6 +1220,53 @@ function registerRoutes() {
     }
   });
 
+  app.get('/api/projects/:id/volumes', (req, res) => {
+    try {
+      const { from, to } = req.query;
+      const validation = validateDateRange(from, to);
+      if (!validation.valid) return res.status(400).json({ error: validation.error });
+      const volumes = db.cloudDetails.getVolumesByProject(req.params.id, from, to).map(v => ({
+        id: v.id,
+        name: v.name,
+        region: v.region,
+        type: v.type,
+        sizeGb: v.size_gb,
+        status: v.status,
+        bootable: v.bootable === 1,
+        attachedTo: v.attached_to ? v.attached_to.split(',') : [],
+        createdAt: v.created_at,
+        allocated: v.allocated === true,
+        total: v.total
+      }));
+      res.json(volumes);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/projects/:id/snapshots', (req, res) => {
+    try {
+      const { from, to } = req.query;
+      const validation = validateDateRange(from, to);
+      if (!validation.valid) return res.status(400).json({ error: validation.error });
+      const snapshots = db.cloudDetails.getSnapshotsByProject(req.params.id, from, to).map(s => ({
+        id: s.id,
+        name: s.name,
+        region: s.region,
+        sizeGb: s.size_gb,
+        status: s.status,
+        visibility: s.visibility,
+        osType: s.os_type,
+        createdAt: s.created_at,
+        allocated: s.allocated === true,
+        total: s.total
+      }));
+      res.json(snapshots);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/api/projects/:id/instance-total', (req, res) => {
     try {
       const { from, to } = req.query;

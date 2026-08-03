@@ -152,6 +152,16 @@ export const fetchProjectInstances = async (projectId, from, to) => {
   return data;
 };
 
+export const fetchProjectVolumes = async (projectId, from, to) => {
+  const { data } = await api.get(`/projects/${projectId}/volumes`, { params: { from, to } });
+  return data;
+};
+
+export const fetchProjectSnapshots = async (projectId, from, to) => {
+  const { data } = await api.get(`/projects/${projectId}/snapshots`, { params: { from, to } });
+  return data;
+};
+
 export const fetchProjectQuotas = async (projectId) => {
   const { data } = await api.get(`/projects/${projectId}/quotas`);
   return data;

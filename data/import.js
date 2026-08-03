@@ -899,6 +899,56 @@ async function importCloudDetails(projectIds) {
       console.error(`    Error fetching quotas: ${err.message}`);
     }
 
+    // Block storage volumes
+    try {
+      const volumes = await withRetry(() => ovh.requestPromised('GET', `/cloud/project/${projectId}/volume`));
+      db.transaction(() => {
+        db.cloudDetails.clearVolumesByProject(projectId);
+        for (const v of (volumes || [])) {
+          db.cloudDetails.upsertVolume({
+            id: v.id,
+            project_id: projectId,
+            name: v.name || '',
+            region: v.region || '',
+            type: v.type || '',
+            size_gb: v.size ?? null,
+            status: v.status || '',
+            bootable: v.bootable ? 1 : 0,
+            attached_to: (v.attachedTo || []).join(','),
+            plan_code: v.planCode || null,
+            created_at: v.creationDate || null
+          });
+        }
+      });
+      console.log(`    ${(volumes || []).length} volumes`);
+    } catch (err) {
+      console.error(`    Error fetching volumes: ${err.message}`);
+    }
+
+    // Instance snapshots (images)
+    try {
+      const snapshots = await withRetry(() => ovh.requestPromised('GET', `/cloud/project/${projectId}/snapshot`));
+      db.transaction(() => {
+        db.cloudDetails.clearSnapshotsByProject(projectId);
+        for (const s of (snapshots || [])) {
+          db.cloudDetails.upsertSnapshot({
+            id: s.id,
+            project_id: projectId,
+            name: s.name || '',
+            region: s.region || '',
+            size_gb: s.size ?? null,
+            status: s.status || '',
+            visibility: s.visibility || '',
+            os_type: s.type || '',
+            created_at: s.creationDate || null
+          });
+        }
+      });
+      console.log(`    ${(snapshots || []).length} snapshots`);
+    } catch (err) {
+      console.error(`    Error fetching snapshots: ${err.message}`);
+    }
+
     // Object storage buckets (S3 + Cold Archive)
     try {
       const buckets = await fetchObjectStorageBuckets(projectId);

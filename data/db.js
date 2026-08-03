@@ -776,6 +776,49 @@ const inventoryOps = {
         )
     `).get(fromDate, toDate);
 
+    // Instances: monthly + hourly lines. Savings plans read as "%instance%" but
+    // are prepaid compute billed on their own line, they are counted apart.
+    const instances = db.prepare(`
+      SELECT ROUND(SUM(d.total_price), 2) as total
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE b.date >= ? AND b.date <= ?
+        AND (d.description LIKE 'Forfait mensuel pour une instance%'
+             OR d.description LIKE 'Consommation à l%heure pour les instances%')
+    `).get(fromDate, toDate);
+
+    const volumes = db.prepare(`
+      SELECT ROUND(SUM(d.total_price), 2) as total
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE b.date >= ? AND b.date <= ?
+        AND d.description LIKE 'Disques supplémentaires%'
+    `).get(fromDate, toDate);
+    const volumeCount = db.prepare(`
+      SELECT COUNT(*) as count FROM cloud_volumes
+      WHERE created_at IS NULL OR SUBSTR(created_at, 1, 10) <= ?
+    `).get(toDate);
+
+    const snapshots = db.prepare(`
+      SELECT ROUND(SUM(d.total_price), 2) as total
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE b.date >= ? AND b.date <= ?
+        AND d.description LIKE 'Snapshots Public Cloud%'
+    `).get(fromDate, toDate);
+    const snapshotCount = db.prepare(`
+      SELECT COUNT(*) as count FROM cloud_snapshots
+      WHERE created_at IS NULL OR SUBSTR(created_at, 1, 10) <= ?
+    `).get(toDate);
+
+    const savingsPlans = db.prepare(`
+      SELECT COUNT(DISTINCT d.description) as count, ROUND(SUM(d.total_price), 2) as total
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE b.date >= ? AND b.date <= ?
+        AND d.description LIKE 'Savings plan%'
+    `).get(fromDate, toDate);
+
     // Count Container Registry services
     const registry = db.prepare(`
       SELECT COUNT(DISTINCT domain) as count, ROUND(SUM(total_price), 2) as total
@@ -805,6 +848,10 @@ const inventoryOps = {
 
     return {
       kubernetes: { count: k8s?.count || 0, total: k8s?.total || 0 },
+      instances: { total: instances?.total || 0 },
+      volumes: { count: volumeCount?.count || 0, total: volumes?.total || 0 },
+      snapshots: { count: snapshotCount?.count || 0, total: snapshots?.total || 0 },
+      savingsPlans: { count: savingsPlans?.count || 0, total: savingsPlans?.total || 0 },
       objectStorage: { count: s3?.count || 0, total: s3Total?.total || 0 },
       registry: { count: registry?.count || 0, total: registry?.total || 0 },
       aiml: { count: aiml?.count || 0, total: aiml?.total || 0 },
@@ -945,6 +992,46 @@ function computeInstanceCosts(db, projectId, fromDate, toDate) {
 }
 
 /**
+ * Spread an aggregated bill amount over rows, pro rata of a weight.
+ *
+ * Several OVH lines are billed per region (and per type) with no per-resource
+ * breakdown: Cold Archive storage, extra disks, snapshots. Every unit inside
+ * such a line is charged at the same rate, so splitting on the resource size is
+ * exact up to intra-month changes. Rows that receive a share are flagged
+ * `allocated` so the UI can show the amount as an estimate.
+ *
+ * The rounding residual goes to the heaviest row, so the rows always add up to
+ * the billed amount.
+ *
+ * @param {Array<Object>} rows    mutated in place: `total` and `allocated`
+ * @param {number} total          amount to spread
+ * @param {Function} weightOf     row -> weight (0 or less excludes the row)
+ * @returns {boolean}             false when nothing could be spread
+ */
+function allocateProRata(rows, total, weightOf) {
+  if (!(total > 0)) return true;
+
+  const eligible = rows.filter(r => weightOf(r) > 0);
+  const totalWeight = eligible.reduce((sum, r) => sum + weightOf(r), 0);
+  if (!totalWeight) return false;
+
+  let distributed = 0;
+  for (const row of eligible) {
+    const share = Math.round(total * (weightOf(row) / totalWeight) * 100) / 100;
+    row.total = Math.round(((row.total || 0) + share) * 100) / 100;
+    row.allocated = true;
+    distributed += share;
+  }
+
+  const residual = Math.round((total - distributed) * 100) / 100;
+  if (residual !== 0) {
+    const heaviest = eligible.reduce((a, b) => (weightOf(b) > weightOf(a) ? b : a));
+    heaviest.total = Math.round((heaviest.total + residual) * 100) / 100;
+  }
+  return true;
+}
+
+/**
  * Spread the aggregated "Stockage Cold Archive" bill line over the archived
  * buckets, pro rata of their stored volume.
  *
@@ -992,21 +1079,7 @@ function allocateColdArchive(db, rows, projectId, fromDate, toDate) {
     return;
   }
 
-  let distributed = 0;
-  for (const row of archived) {
-    const share = Math.round(coldArchiveTotal * (row.objects_size / archivedSize) * 100) / 100;
-    row.total = Math.round((row.total + share) * 100) / 100;
-    row.allocated = true;
-    distributed += share;
-  }
-
-  // Give the rounding residual to the largest bucket so the rows still add up
-  // to the billed amount.
-  const residual = Math.round((coldArchiveTotal - distributed) * 100) / 100;
-  if (residual !== 0) {
-    const largest = archived.reduce((a, b) => (b.objects_size > a.objects_size ? b : a));
-    largest.total = Math.round((largest.total + residual) * 100) / 100;
-  }
+  allocateProRata(archived, coldArchiveTotal, r => r.objects_size);
 }
 
 // Cloud detail operations (Phase 4)
@@ -1209,6 +1282,126 @@ const cloudDetailOps = {
     `).get(projectId, fromDate, toDate);
   },
 
+  upsertVolume: (volume) => {
+    const db = getDb();
+    const stmt = db.prepare(`
+      INSERT INTO cloud_volumes (id, project_id, name, region, type, size_gb, status, bootable, attached_to, plan_code, created_at, imported_at)
+      VALUES (@id, @project_id, @name, @region, @type, @size_gb, @status, @bootable, @attached_to, @plan_code, @created_at, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        name = @name, region = @region, type = @type, size_gb = @size_gb, status = @status,
+        bootable = @bootable, attached_to = @attached_to, plan_code = @plan_code,
+        created_at = @created_at, imported_at = CURRENT_TIMESTAMP
+    `);
+    return stmt.run(volume);
+  },
+
+  upsertSnapshot: (snapshot) => {
+    const db = getDb();
+    const stmt = db.prepare(`
+      INSERT INTO cloud_snapshots (id, project_id, name, region, size_gb, status, visibility, os_type, created_at, imported_at)
+      VALUES (@id, @project_id, @name, @region, @size_gb, @status, @visibility, @os_type, @created_at, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        name = @name, region = @region, size_gb = @size_gb, status = @status,
+        visibility = @visibility, os_type = @os_type, created_at = @created_at,
+        imported_at = CURRENT_TIMESTAMP
+    `);
+    return stmt.run(snapshot);
+  },
+
+  clearVolumesByProject: (projectId) => {
+    getDb().prepare('DELETE FROM cloud_volumes WHERE project_id = ?').run(projectId);
+  },
+
+  clearSnapshotsByProject: (projectId) => {
+    getDb().prepare('DELETE FROM cloud_snapshots WHERE project_id = ?').run(projectId);
+  },
+
+  /**
+   * Volumes of a project with their cost.
+   *
+   * OVH bills extra disks per region and per type ("Disques supplémentaires à
+   * gra5 de type classic"), never per volume, so each line is spread over the
+   * volumes of that region and type pro rata of their size. Verified against a
+   * live account: the billed quantity divided by the hours in the month equals
+   * the summed volume size to the GB.
+   */
+  getVolumesByProject: (projectId, fromDate, toDate) => {
+    const db = getDb();
+    const volumes = db.prepare(`
+      SELECT id, name, region, type, size_gb, status, bootable, attached_to, created_at
+      FROM cloud_volumes
+      WHERE project_id = ?
+        AND (created_at IS NULL OR SUBSTR(created_at, 1, 10) <= ?)
+    `).all(projectId, toDate).map(v => ({ ...v, total: 0, allocated: false }));
+
+    const lines = db.prepare(`
+      SELECT d.description as description, ROUND(SUM(d.total_price), 2) as total
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE d.project_id = ?
+        AND b.date >= ? AND b.date <= ?
+        AND d.description LIKE 'Disques supplémentaires%'
+      GROUP BY d.description
+    `).all(projectId, fromDate, toDate);
+
+    for (const line of lines) {
+      // "Disques supplémentaires à <region> de type <type>"
+      const match = line.description.match(/à\s+(\S+)\s+de type\s+(.+)$/i);
+      const region = (match?.[1] || '').toLowerCase();
+      const type = (match?.[2] || '').trim().toLowerCase();
+      const matching = volumes.filter(v =>
+        (v.region || '').toLowerCase() === region && (v.type || '').toLowerCase() === type
+      );
+      if (!allocateProRata(matching, line.total, v => v.size_gb)) {
+        volumes.push({
+          id: null, name: line.description, region: match?.[1] || null, type: match?.[2] || null,
+          size_gb: null, status: null, bootable: 0, attached_to: null, created_at: null,
+          total: line.total, allocated: true, in_inventory: 0
+        });
+      }
+    }
+
+    return volumes.sort((a, b) => b.total - a.total || (a.name || '').localeCompare(b.name || ''));
+  },
+
+  /**
+   * Snapshots of a project with their cost. Same aggregation as volumes, but
+   * billed per region only ("Snapshots Public Cloud - gra1").
+   */
+  getSnapshotsByProject: (projectId, fromDate, toDate) => {
+    const db = getDb();
+    const snapshots = db.prepare(`
+      SELECT id, name, region, size_gb, status, visibility, os_type, created_at
+      FROM cloud_snapshots
+      WHERE project_id = ?
+        AND (created_at IS NULL OR SUBSTR(created_at, 1, 10) <= ?)
+    `).all(projectId, toDate).map(s => ({ ...s, total: 0, allocated: false }));
+
+    const lines = db.prepare(`
+      SELECT d.description as description, ROUND(SUM(d.total_price), 2) as total
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE d.project_id = ?
+        AND b.date >= ? AND b.date <= ?
+        AND d.description LIKE 'Snapshots Public Cloud%'
+      GROUP BY d.description
+    `).all(projectId, fromDate, toDate);
+
+    for (const line of lines) {
+      const region = (line.description.split('-').pop() || '').trim().toLowerCase();
+      const matching = snapshots.filter(s => (s.region || '').toLowerCase() === region);
+      if (!allocateProRata(matching, line.total, s => s.size_gb)) {
+        snapshots.push({
+          id: null, name: line.description, region: region || null, size_gb: null,
+          status: null, visibility: null, os_type: null, created_at: null,
+          total: line.total, allocated: true, in_inventory: 0
+        });
+      }
+    }
+
+    return snapshots.sort((a, b) => b.total - a.total || (a.name || '').localeCompare(b.name || ''));
+  },
+
   upsertBucket: (bucket) => {
     const db = getDb();
     const stmt = db.prepare(`
@@ -1386,6 +1579,8 @@ function clearAll() {
   db.exec('DELETE FROM cloud_instances');
   db.exec('DELETE FROM project_quotas');
   db.exec('DELETE FROM object_storage_buckets');
+  db.exec('DELETE FROM cloud_volumes');
+  db.exec('DELETE FROM cloud_snapshots');
   db.exec('DELETE FROM bills');
   db.exec('DELETE FROM projects');
   // Optionnel : vider aussi les autres tables annexes si besoin

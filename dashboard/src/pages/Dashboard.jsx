@@ -12,7 +12,8 @@ import {
   fetchInventoryVps, fetchInventoryStorage, fetchExpiringServices,
   fetchByResourceType, fetchResourceTypeDetails, fetchProjectsEnriched, fetchProjectConsumption,
   fetchProjectInstances, fetchProjectQuotas, fetchGpuSummary, fetchPublicCloudStats, fetchBackupStats,
-  fetchProjectBuckets, fetchProjectInstanceTotal
+  fetchProjectBuckets, fetchProjectInstanceTotal,
+  fetchProjectVolumes, fetchProjectSnapshots
 } from '../services/api';
 import { useLanguage } from '../hooks/useLanguage.jsx';
 import Logo from '../components/Logo';
@@ -134,8 +135,117 @@ const bucketCsvColumns = (language) => [
   { key: 'createdAt', label: language === 'en' ? 'Created at' : 'Créé le' }
 ];
 
+// Shown on every amount that is a share of an aggregated bill line rather than
+// a figure billed for that single resource.
+const PRO_RATA_HINT = {
+  fr: 'Quote-part d\'une ligne de facture agrégée par région, au prorata de la taille',
+  en: 'Share of a bill line aggregated per region, pro rata of the size'
+};
+
 const sortBucketsByName = (buckets) =>
   [...buckets].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base' }));
+
+// Block storage volumes of a project, shared by the inline panel and its modal.
+const VolumesTable = ({ volumes, language, t, fmt }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
+        <th className="p-2 text-left font-medium">Type</th>
+        <th className="p-2 text-left font-medium">{t('region')}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Size' : 'Taille'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {volumes.map((v, i) => (
+        <tr key={v.id || i} className="border-b hover:bg-gray-50">
+          <td className="p-2 font-medium text-xs truncate max-w-[200px]" title={v.name}>
+            {v.name}
+            {v.attachedTo && v.attachedTo.length === 0 && (
+              <span
+                className="ml-1 px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-700"
+                title={language === 'en' ? 'Not attached to any instance' : "Attaché à aucune instance"}
+              >
+                {language === 'en' ? 'detached' : 'détaché'}
+              </span>
+            )}
+          </td>
+          <td className="p-2 text-xs">
+            <span className={`px-1.5 py-0.5 rounded text-xs ${v.type === 'high-speed' ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-700'}`}>
+              {v.type}
+            </span>
+          </td>
+          <td className="p-2 text-xs">{v.region}</td>
+          <td className="p-2 text-right text-xs">{v.sizeGb !== null && v.sizeGb !== undefined ? `${Math.round(v.sizeGb)} GB` : '-'}</td>
+          <td className="p-2 text-right font-medium text-xs" title={v.allocated ? PRO_RATA_HINT[language] : undefined}>
+            {v.allocated && <span className="text-gray-400">~</span>}
+            {fmt(v.total)}€
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+// Instance snapshots of a project, shared by the inline panel and its modal.
+const SnapshotsTable = ({ snapshots, language, t, fmt, locale }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
+        <th className="p-2 text-left font-medium">{t('region')}</th>
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Created at' : 'Créé le'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Size' : 'Taille'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {snapshots.map((sn, i) => (
+        <tr key={sn.id || i} className="border-b hover:bg-gray-50">
+          <td className="p-2 font-medium text-xs truncate max-w-[220px]" title={sn.name}>{sn.name}</td>
+          <td className="p-2 text-xs">{sn.region}</td>
+          <td className="p-2 text-xs text-gray-500">
+            {sn.createdAt ? new Date(sn.createdAt).toLocaleDateString(locale) : '-'}
+          </td>
+          <td className="p-2 text-right text-xs">{sn.sizeGb !== null && sn.sizeGb !== undefined ? `${Math.round(sn.sizeGb)} GB` : '-'}</td>
+          <td className="p-2 text-right font-medium text-xs" title={sn.allocated ? PRO_RATA_HINT[language] : undefined}>
+            {sn.allocated && <span className="text-gray-400">~</span>}
+            {fmt(sn.total)}€
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+const volumeCsvColumns = (language) => [
+  { key: 'name', label: language === 'en' ? 'Name' : 'Nom' },
+  { key: 'type', label: 'Type' },
+  { key: 'region', label: language === 'en' ? 'Region' : 'Région' },
+  { key: 'sizeGb', label: language === 'en' ? 'Size (GB)' : 'Taille (Go)' },
+  { key: 'status', label: language === 'en' ? 'Status' : 'Statut' },
+  { key: 'attached', label: language === 'en' ? 'Attached' : 'Attaché' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' },
+  { key: 'allocated', label: language === 'en' ? 'Estimated' : 'Estimé' },
+  { key: 'createdAt', label: language === 'en' ? 'Created at' : 'Créé le' },
+  { key: 'id', label: 'ID' }
+];
+
+const volumeCsvRows = (volumes) =>
+  volumes.map(v => ({ ...v, attached: (v.attachedTo || []).join(' ') }));
+
+const snapshotCsvColumns = (language) => [
+  { key: 'name', label: language === 'en' ? 'Name' : 'Nom' },
+  { key: 'region', label: language === 'en' ? 'Region' : 'Région' },
+  { key: 'sizeGb', label: language === 'en' ? 'Size (GB)' : 'Taille (Go)' },
+  { key: 'visibility', label: language === 'en' ? 'Visibility' : 'Visibilité' },
+  { key: 'osType', label: 'OS' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' },
+  { key: 'allocated', label: language === 'en' ? 'Estimated' : 'Estimé' },
+  { key: 'createdAt', label: language === 'en' ? 'Created at' : 'Créé le' },
+  { key: 'id', label: 'ID' }
+];
 
 // Cloud instances of a project, shared by the inline panel and its modal.
 const InstancesTable = ({ instances, language, t, fmt }) => (
@@ -271,6 +381,8 @@ export default function Dashboard() {
   const [showAllBuckets, setShowAllBuckets] = useState(false);
   const [showAllInstances, setShowAllInstances] = useState(false);
   const [showAllServers, setShowAllServers] = useState(false);
+  const [showAllVolumes, setShowAllVolumes] = useState(false);
+  const [showAllSnapshots, setShowAllSnapshots] = useState(false);
 
   // Helper to format currency with current language
   const fmt = (value) => formatCurrency(value, language);
@@ -543,6 +655,18 @@ export default function Dashboard() {
   });
 
   // Project buckets (filtered by selected month)
+  const { data: projectVolumes = [] } = useQuery({
+    queryKey: ['projectVolumes', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectVolumes(selectedProject.id, selectedMonth.from, selectedMonth.to),
+    enabled: !!selectedProject?.id && !!selectedMonth
+  });
+
+  const { data: projectSnapshots = [] } = useQuery({
+    queryKey: ['projectSnapshots', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectSnapshots(selectedProject.id, selectedMonth.from, selectedMonth.to),
+    enabled: !!selectedProject?.id && !!selectedMonth
+  });
+
   const { data: projectBuckets = [] } = useQuery({
     queryKey: ['projectBuckets', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
     queryFn: () => fetchProjectBuckets(selectedProject.id, selectedMonth.from, selectedMonth.to),
@@ -1621,6 +1745,9 @@ export default function Dashboard() {
                 <div className="text-3xl font-bold text-indigo-600 mt-2">
                   {projectsEnriched.reduce((sum, p) => sum + (p.instance_count || 0), 0)}
                 </div>
+                {publicCloudStats?.instances?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.instances.total)}€</p>
+                )}
               </div>
               <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
                 <span className="text-gray-500 text-sm">{language === 'en' ? 'GPU Instances' : 'Instances GPU'}</span>
@@ -1638,6 +1765,27 @@ export default function Dashboard() {
                 <div className="text-3xl font-bold text-green-600 mt-2">{publicCloudStats?.objectStorage?.count || 0}</div>
                 {publicCloudStats?.objectStorage?.total > 0 && (
                   <p className="text-xs text-gray-400">{fmt(publicCloudStats.objectStorage.total)}€</p>
+                )}
+              </div>
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+                <span className="text-gray-500 text-sm">{language === 'en' ? 'Volumes' : 'Volumes'}</span>
+                <div className="text-3xl font-bold text-teal-600 mt-2">{publicCloudStats?.volumes?.count || 0}</div>
+                {publicCloudStats?.volumes?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.volumes.total)}€</p>
+                )}
+              </div>
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+                <span className="text-gray-500 text-sm">Snapshots</span>
+                <div className="text-3xl font-bold text-amber-600 mt-2">{publicCloudStats?.snapshots?.count || 0}</div>
+                {publicCloudStats?.snapshots?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.snapshots.total)}€</p>
+                )}
+              </div>
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+                <span className="text-gray-500 text-sm">{language === 'en' ? 'Savings plans' : 'Savings plans'}</span>
+                <div className="text-3xl font-bold text-rose-600 mt-2">{publicCloudStats?.savingsPlans?.count || 0}</div>
+                {publicCloudStats?.savingsPlans?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.savingsPlans.total)}€</p>
                 )}
               </div>
               <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
@@ -1794,6 +1942,58 @@ export default function Dashboard() {
                                         {/* ~11 rows before scrolling */}
                                         <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
                                           <BucketsTable buckets={projectBuckets} language={language} t={t} fmt={fmt} fmtBytes={fmtBytes} />
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Volumes */}
+                                    {projectVolumes.length > 0 && (
+                                      <div>
+                                        <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                          <span>
+                                            Volumes ({projectVolumes.length})
+                                            <span className="ml-2 text-sm font-normal text-teal-600">
+                                              {fmt(projectVolumes.reduce((sum, v) => sum + (v.total || 0), 0))}€
+                                            </span>
+                                          </span>
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllVolumes(true)}
+                                            onExport={() => downloadCSV(
+                                              volumeCsvRows(projectVolumes),
+                                              volumeCsvColumns(language),
+                                              `ovh-volumes-${selectedMonth?.value || 'export'}`
+                                            )}
+                                          />
+                                        </h4>
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
+                                          <VolumesTable volumes={projectVolumes} language={language} t={t} fmt={fmt} />
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Snapshots */}
+                                    {projectSnapshots.length > 0 && (
+                                      <div>
+                                        <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                          <span>
+                                            Snapshots ({projectSnapshots.length})
+                                            <span className="ml-2 text-sm font-normal text-amber-600">
+                                              {fmt(projectSnapshots.reduce((sum, sn) => sum + (sn.total || 0), 0))}€
+                                            </span>
+                                          </span>
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllSnapshots(true)}
+                                            onExport={() => downloadCSV(
+                                              projectSnapshots,
+                                              snapshotCsvColumns(language),
+                                              `ovh-snapshots-${selectedMonth?.value || 'export'}`
+                                            )}
+                                          />
+                                        </h4>
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
+                                          <SnapshotsTable snapshots={projectSnapshots} language={language} t={t} fmt={fmt} locale={locale} />
                                         </div>
                                       </div>
                                     )}
@@ -2192,6 +2392,58 @@ export default function Dashboard() {
         }
       >
         <ServersTable servers={inventoryServers} t={t} />
+      </Modal>
+
+      <Modal
+        open={showAllVolumes}
+        onClose={() => setShowAllVolumes(false)}
+        maxWidth="max-w-5xl"
+        title={
+          <>
+            Volumes ({projectVolumes.length})
+            <span className="ml-2 text-sm font-normal text-teal-600">
+              {fmt(projectVolumes.reduce((sum, v) => sum + (v.total || 0), 0))}€
+            </span>
+          </>
+        }
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(
+              volumeCsvRows(projectVolumes),
+              volumeCsvColumns(language),
+              `ovh-volumes-${selectedMonth?.value || 'export'}`
+            )}
+          />
+        }
+      >
+        <VolumesTable volumes={projectVolumes} language={language} t={t} fmt={fmt} />
+      </Modal>
+
+      <Modal
+        open={showAllSnapshots}
+        onClose={() => setShowAllSnapshots(false)}
+        maxWidth="max-w-5xl"
+        title={
+          <>
+            Snapshots ({projectSnapshots.length})
+            <span className="ml-2 text-sm font-normal text-amber-600">
+              {fmt(projectSnapshots.reduce((sum, sn) => sum + (sn.total || 0), 0))}€
+            </span>
+          </>
+        }
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(
+              projectSnapshots,
+              snapshotCsvColumns(language),
+              `ovh-snapshots-${selectedMonth?.value || 'export'}`
+            )}
+          />
+        }
+      >
+        <SnapshotsTable snapshots={projectSnapshots} language={language} t={t} fmt={fmt} locale={locale} />
       </Modal>
     </div>
   );

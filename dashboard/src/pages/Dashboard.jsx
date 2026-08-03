@@ -13,7 +13,7 @@ import {
   fetchByResourceType, fetchResourceTypeDetails, fetchProjectsEnriched, fetchProjectConsumption,
   fetchProjectInstances, fetchProjectQuotas, fetchGpuSummary, fetchPublicCloudStats, fetchBackupStats,
   fetchProjectBuckets, fetchProjectInstanceTotal,
-  fetchProjectVolumes, fetchProjectSnapshots
+  fetchProjectVolumes, fetchProjectSnapshots, fetchProjectSavingsPlans
 } from '../services/api';
 import { useLanguage } from '../hooks/useLanguage.jsx';
 import Logo from '../components/Logo';
@@ -146,6 +146,61 @@ const PRO_RATA_HINT = {
 
 const sortBucketsByName = (buckets) =>
   [...buckets].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base' }));
+
+// Savings plans of a project, read from the bills: there is no savings plan
+// route under /cloud/project in the v6 API.
+const SavingsPlansTable = ({ plans, language, fmt }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Plan' : 'Plan'}</th>
+        <th className="p-2 text-left font-medium">Flavor</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Covered' : 'Couvert'}</th>
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Last billed' : 'Dernière facture'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {plans.map((plan, i) => {
+        const over = plan.inventory !== null && plan.covered > plan.inventory;
+        return (
+          <tr key={plan.id || i} className="border-b hover:bg-gray-50">
+            <td className="p-2 font-medium text-xs truncate max-w-[220px]" title={plan.id}>{plan.id}</td>
+            <td className="p-2 text-xs">{plan.flavor}</td>
+            <td className="p-2 text-right text-xs">
+              <span
+                className={`px-1.5 py-0.5 rounded ${over ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}
+                title={over
+                  ? (language === 'en'
+                    ? 'The plan pays for more instances than the project runs'
+                    : 'Le plan paie plus d\'instances que le projet n\'en fait tourner')
+                  : (language === 'en'
+                    ? 'Instances paid by the plan / instances of that flavor in the inventory'
+                    : 'Instances payées par le plan / instances de ce flavor dans l\'inventaire')}
+              >
+                {plan.covered}{plan.inventory !== null ? ` / ${plan.inventory}` : ''}
+              </span>
+            </td>
+            <td className="p-2 text-xs text-gray-500">{plan.lastDate || '-'}</td>
+            <td className="p-2 text-right font-medium text-xs">{fmt(plan.total)}€</td>
+          </tr>
+        );
+      })}
+    </tbody>
+  </table>
+);
+
+const savingsPlanCsvColumns = (language) => [
+  { key: 'id', label: 'Plan' },
+  { key: 'flavor', label: 'Flavor' },
+  { key: 'covered', label: language === 'en' ? 'Instances covered' : 'Instances couvertes' },
+  { key: 'inventory', label: language === 'en' ? 'Instances in inventory' : 'Instances en inventaire' },
+  { key: 'duration', label: language === 'en' ? 'Duration' : 'Durée' },
+  { key: 'months', label: language === 'en' ? 'Billed months' : 'Mois facturés' },
+  { key: 'firstDate', label: language === 'en' ? 'First billed' : 'Première facture' },
+  { key: 'lastDate', label: language === 'en' ? 'Last billed' : 'Dernière facture' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' }
+];
 
 // Block storage volumes of a project, shared by the inline panel and its modal.
 const VolumesTable = ({ volumes, language, t, fmt }) => (
@@ -385,6 +440,7 @@ export default function Dashboard() {
   const [showAllServers, setShowAllServers] = useState(false);
   const [showAllVolumes, setShowAllVolumes] = useState(false);
   const [showAllSnapshots, setShowAllSnapshots] = useState(false);
+  const [showAllSavingsPlans, setShowAllSavingsPlans] = useState(false);
 
   // Helper to format currency with current language
   const fmt = (value) => formatCurrency(value, language);
@@ -666,6 +722,12 @@ export default function Dashboard() {
   const { data: projectSnapshots = [] } = useQuery({
     queryKey: ['projectSnapshots', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
     queryFn: () => fetchProjectSnapshots(selectedProject.id, selectedMonth.from, selectedMonth.to),
+    enabled: !!selectedProject?.id && !!selectedMonth
+  });
+
+  const { data: projectSavingsPlans = [] } = useQuery({
+    queryKey: ['projectSavingsPlans', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectSavingsPlans(selectedProject.id, selectedMonth.from, selectedMonth.to),
     enabled: !!selectedProject?.id && !!selectedMonth
   });
 
@@ -1999,6 +2061,32 @@ export default function Dashboard() {
                                         </div>
                                       </div>
                                     )}
+
+                                    {/* Savings plans */}
+                                    {projectSavingsPlans.length > 0 && (
+                                      <div className="lg:col-span-2">
+                                        <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                          <span>
+                                            Savings plans ({projectSavingsPlans.length})
+                                            <span className="ml-2 text-sm font-normal text-rose-600">
+                                              {fmt(projectSavingsPlans.reduce((sum, p) => sum + (p.total || 0), 0))}€
+                                            </span>
+                                          </span>
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllSavingsPlans(true)}
+                                            onExport={() => downloadCSV(
+                                              projectSavingsPlans,
+                                              savingsPlanCsvColumns(language),
+                                              `ovh-savings-plans-${selectedMonth?.value || 'export'}`
+                                            )}
+                                          />
+                                        </h4>
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
+                                          <SavingsPlansTable plans={projectSavingsPlans} language={language} fmt={fmt} />
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
 
                                   {/* Quotas — only regions with capacity */}
@@ -2446,6 +2534,32 @@ export default function Dashboard() {
         }
       >
         <SnapshotsTable snapshots={projectSnapshots} language={language} t={t} fmt={fmt} locale={locale} />
+      </Modal>
+
+      <Modal
+        open={showAllSavingsPlans}
+        onClose={() => setShowAllSavingsPlans(false)}
+        maxWidth="max-w-4xl"
+        title={
+          <>
+            Savings plans ({projectSavingsPlans.length})
+            <span className="ml-2 text-sm font-normal text-rose-600">
+              {fmt(projectSavingsPlans.reduce((sum, p) => sum + (p.total || 0), 0))}€
+            </span>
+          </>
+        }
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(
+              projectSavingsPlans,
+              savingsPlanCsvColumns(language),
+              `ovh-savings-plans-${selectedMonth?.value || 'export'}`
+            )}
+          />
+        }
+      >
+        <SavingsPlansTable plans={projectSavingsPlans} language={language} fmt={fmt} />
       </Modal>
     </div>
   );

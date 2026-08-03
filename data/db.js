@@ -1446,6 +1446,61 @@ const cloudDetailOps = {
     return snapshots.sort((a, b) => b.total - a.total || (a.name || '').localeCompare(b.name || ''));
   },
 
+  /**
+   * Savings plans of a project, read from the bills.
+   *
+   * There is no savings plan route under /cloud/project in the v6 API, but the
+   * bill line carries everything worth showing:
+   *   "Savings plan (id : savings-plan-3xc3-4_node_k8s) pour 3 instance(s) c3-4 - Durée : 1M"
+   *
+   * `covered` is how many instances the plan pays for, `inventory` how many
+   * instances of that flavor actually exist: a plan covering more than what
+   * runs is money burnt, fewer means the surplus is billed at the hourly rate.
+   */
+  getSavingsPlansByProject: (projectId, fromDate, toDate) => {
+    const db = getDb();
+    const lines = db.prepare(`
+      SELECT d.description as description,
+             ROUND(SUM(d.total_price), 2) as total,
+             COUNT(*) as months,
+             MIN(b.date) as first_date,
+             MAX(b.date) as last_date
+      FROM bill_details d
+      JOIN bills b ON d.bill_id = b.id
+      WHERE d.project_id = ?
+        AND b.date >= ? AND b.date <= ?
+        AND d.description LIKE 'Savings plan%'
+      GROUP BY d.description
+    `).all(projectId, fromDate, toDate);
+
+    const instances = db.prepare(
+      'SELECT plan_code, flavor FROM cloud_instances WHERE project_id = ?'
+    ).all(projectId);
+
+    return lines.map(line => {
+      const id = line.description.match(/\(id\s*:\s*([^)]+)\)/i)?.[1]?.trim() || null;
+      const covered = parseInt(line.description.match(/pour\s+(\d+)\s+instance/i)?.[1] || '0', 10);
+      const flavor = line.description.match(/instance\(s\)\s+(\S+)/i)?.[1] || null;
+      const duration = line.description.match(/Durée\s*:\s*(\S+)/i)?.[1] || null;
+      const normalized = normalizeFlavor(flavor);
+      const inventory = normalized
+        ? instances.filter(i => normalizeFlavor(i.plan_code) === normalized || normalizeFlavor(i.flavor) === normalized).length
+        : null;
+
+      return {
+        id,
+        flavor,
+        duration,
+        covered,
+        inventory,
+        months: line.months,
+        first_date: line.first_date,
+        last_date: line.last_date,
+        total: line.total
+      };
+    }).sort((a, b) => b.total - a.total);
+  },
+
   upsertBucket: (bucket) => {
     const db = getDb();
     const stmt = db.prepare(`

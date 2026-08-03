@@ -162,6 +162,11 @@ export const fetchProjectSnapshots = async (projectId, from, to) => {
   return data;
 };
 
+export const fetchProjectSavingsPlans = async (projectId, from, to) => {
+  const { data } = await api.get(`/projects/${projectId}/savings-plans`, { params: { from, to } });
+  return data;
+};
+
 export const fetchProjectQuotas = async (projectId) => {
   const { data } = await api.get(`/projects/${projectId}/quotas`);
   return data;

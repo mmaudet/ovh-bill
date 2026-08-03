@@ -1267,6 +1267,28 @@ function registerRoutes() {
     }
   });
 
+  app.get('/api/projects/:id/savings-plans', (req, res) => {
+    try {
+      const { from, to } = req.query;
+      const validation = validateDateRange(from, to);
+      if (!validation.valid) return res.status(400).json({ error: validation.error });
+      const plans = db.cloudDetails.getSavingsPlansByProject(req.params.id, from, to).map(p => ({
+        id: p.id,
+        flavor: p.flavor,
+        duration: p.duration,
+        covered: p.covered,
+        inventory: p.inventory,
+        months: p.months,
+        firstDate: p.first_date,
+        lastDate: p.last_date,
+        total: p.total
+      }));
+      res.json(plans);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/api/projects/:id/instance-total', (req, res) => {
     try {
       const { from, to } = req.query;

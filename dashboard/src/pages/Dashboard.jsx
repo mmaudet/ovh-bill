@@ -138,7 +138,7 @@ const sortBucketsByName = (buckets) =>
   [...buckets].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base' }));
 
 // Cloud instances of a project, shared by the inline panel and its modal.
-const InstancesTable = ({ instances, language, t }) => (
+const InstancesTable = ({ instances, language, t, fmt }) => (
   <table className="w-full text-sm">
     <thead>
       <tr className="border-b bg-gray-50">
@@ -146,10 +146,11 @@ const InstancesTable = ({ instances, language, t }) => (
         <th className="p-2 text-left font-medium">Flavor</th>
         <th className="p-2 text-left font-medium">{t('region')}</th>
         <th className="p-2 text-left font-medium">{t('state')}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
       </tr>
     </thead>
     <tbody>
-      {instances.map(inst => {
+      {[...instances].sort((a, b) => (b.total || 0) - (a.total || 0)).map(inst => {
         const pc = inst.plan_code || inst.flavor || '';
         const isGpu = /^(l4-|l40s-|a100-|h100-|v100-|t1-|t2-)/.test(pc);
         return (
@@ -168,6 +169,23 @@ const InstancesTable = ({ instances, language, t }) => (
                 {inst.status}
               </span>
             </td>
+            <td
+              className="p-2 text-right font-medium text-xs"
+              title={inst.cost_estimated
+                ? (language === 'en'
+                  ? 'Even share of the aggregated hourly line for this flavor: the API exposes no per-instance runtime'
+                  : 'Part égale de la ligne horaire agrégée de ce flavor : l\'API n\'expose pas le temps de fonctionnement par instance')
+                : undefined}
+            >
+              {inst.total === null || inst.total === undefined ? (
+                <span className="text-gray-300">-</span>
+              ) : (
+                <>
+                  {inst.cost_estimated && <span className="text-gray-400">~</span>}
+                  {fmt(inst.total)}€
+                </>
+              )}
+            </td>
           </tr>
         );
       })}
@@ -180,6 +198,8 @@ const instanceCsvColumns = (language) => [
   { key: 'flavor_display', label: 'Flavor' },
   { key: 'region', label: language === 'en' ? 'Region' : 'Région' },
   { key: 'status', label: language === 'en' ? 'State' : 'État' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' },
+  { key: 'cost_estimated', label: language === 'en' ? 'Estimated' : 'Estimé' },
   { key: 'monthly_billing', label: language === 'en' ? 'Monthly billing' : 'Facturation mensuelle' },
   { key: 'created_at', label: language === 'en' ? 'Created at' : 'Créé le' },
   { key: 'id', label: 'ID' }
@@ -511,8 +531,8 @@ export default function Dashboard() {
   });
 
   const { data: projectInstances = [] } = useQuery({
-    queryKey: ['projectInstances', selectedProject?.id],
-    queryFn: () => fetchProjectInstances(selectedProject.id),
+    queryKey: ['projectInstances', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectInstances(selectedProject.id, selectedMonth?.from, selectedMonth?.to),
     enabled: !!selectedProject
   });
 
@@ -1742,7 +1762,7 @@ export default function Dashboard() {
                                       </h4>
                                       {projectInstances.length > 0 ? (
                                         <div className="overflow-y-auto max-h-52 bg-white rounded-lg">
-                                          <InstancesTable instances={projectInstances} language={language} t={t} />
+                                          <InstancesTable instances={projectInstances} language={language} t={t} fmt={fmt} />
                                         </div>
                                       ) : (
                                         <div className="flex items-center justify-center h-16 text-gray-400 text-sm">
@@ -2156,7 +2176,7 @@ export default function Dashboard() {
           />
         }
       >
-        <InstancesTable instances={projectInstances} language={language} t={t} />
+        <InstancesTable instances={projectInstances} language={language} t={t} fmt={fmt} />
       </Modal>
 
       <Modal

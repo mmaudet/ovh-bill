@@ -1170,7 +1170,13 @@ function registerRoutes() {
 
   app.get('/api/projects/:id/instances', (req, res) => {
     try {
-      const instances = db.cloudDetails.getInstancesByProject(req.params.id);
+      // from/to are optional: without them the list carries no cost
+      const { from, to } = req.query;
+      if (from || to) {
+        const validation = validateDateRange(from, to);
+        if (!validation.valid) return res.status(400).json({ error: validation.error });
+      }
+      const instances = db.cloudDetails.getInstancesByProject(req.params.id, from, to);
       res.json(instances);
     } catch (err) {
       res.status(500).json({ error: err.message });

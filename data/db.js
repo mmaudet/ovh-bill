@@ -849,6 +849,102 @@ const inventoryOps = {
 };
 
 /**
+ * Normalize a flavor / plan code so a bill wording and an inventory plan code
+ * can be compared: "c3-4.consumption.3AZ" and "c3-4-3az" are the same flavor.
+ */
+function normalizeFlavor(value) {
+  return (value || '')
+    .toLowerCase()
+    .replace(/\.consumption|\.monthly\.postpaid/g, '')
+    .replace(/[._]/g, '-');
+}
+
+/**
+ * Per-instance cost over a period.
+ *
+ * Two billing modes, handled differently:
+ *
+ * - monthly instances carry their own UUID in the description ("Forfait mensuel
+ *   pour une instance eg-30 (id <uuid>, region gra1)"), so the cost is exact.
+ * - hourly instances are billed on one aggregated line per flavor (and often
+ *   per region): "Consommation à l'heure pour les instances r3-16 gra11". That
+ *   line is split evenly across the matching hourly instances and flagged as an
+ *   estimate: the API exposes no per-instance runtime to weight it with.
+ *
+ * Compute covered by a savings plan is billed on the plan's own line and is
+ * deliberately left out of both: it belongs to the plan, not to an instance.
+ *
+ * @returns {{costs: Map<string, {total: number, estimated: boolean}>, unmatched: number}}
+ */
+function computeInstanceCosts(db, projectId, fromDate, toDate) {
+  const costs = new Map();
+  let unmatched = 0;
+
+  const lines = db.prepare(`
+    SELECT d.description as description, d.total_price as price
+    FROM bill_details d
+    JOIN bills b ON d.bill_id = b.id
+    WHERE d.project_id = ?
+      AND b.date >= ? AND b.date <= ?
+      AND (d.description LIKE 'Forfait mensuel pour une instance%'
+           OR d.description LIKE 'Consommation à l%heure pour les instances%')
+  `).all(projectId, fromDate, toDate);
+
+  const instances = db.prepare(
+    'SELECT id, plan_code, flavor, region, monthly_billing FROM cloud_instances WHERE project_id = ?'
+  ).all(projectId);
+
+  const add = (id, price, estimated) => {
+    const current = costs.get(id) || { total: 0, estimated: false };
+    current.total = Math.round((current.total + price) * 100) / 100;
+    current.estimated = current.estimated || estimated;
+    costs.set(id, current);
+  };
+
+  const hourly = instances.filter(i => !i.monthly_billing);
+
+  for (const line of lines) {
+    const monthly = line.description.match(/\(id ([0-9a-f-]{36})/i);
+    if (monthly) {
+      add(monthly[1], line.price, false);
+      continue;
+    }
+
+    // "Consommation à l'heure pour les instances <flavor> [<region>]"
+    const rest = line.description.replace(/^Consommation à l.heure pour les instances\s*/i, '').trim();
+    if (!rest) { unmatched += line.price; continue; }
+
+    const tokens = rest.split(/\s+/);
+    const candidates = [];
+    if (tokens.length > 1) {
+      const region = tokens[tokens.length - 1].toLowerCase();
+      const flavor = normalizeFlavor(tokens.slice(0, -1).join('-'));
+      candidates.push(...hourly.filter(i =>
+        (i.region || '').toLowerCase() === region &&
+        (normalizeFlavor(i.plan_code) === flavor || normalizeFlavor(i.flavor) === flavor)
+      ));
+    }
+    if (!candidates.length) {
+      const flavor = normalizeFlavor(rest.replace(/\s+/g, '-'));
+      candidates.push(...hourly.filter(i =>
+        normalizeFlavor(i.plan_code) === flavor || normalizeFlavor(i.flavor) === flavor
+      ));
+    }
+
+    if (!candidates.length) { unmatched += line.price; continue; }
+
+    // No runtime available per instance, so split the line evenly. The rounding
+    // residual goes to the first one so the column still adds up to the bill.
+    const share = Math.round((line.price / candidates.length) * 100) / 100;
+    candidates.forEach(i => add(i.id, share, true));
+    const residual = Math.round((line.price - share * candidates.length) * 100) / 100;
+    if (residual !== 0) add(candidates[0].id, residual, true);
+  }
+
+  return { costs, unmatched: Math.round(unmatched * 100) / 100 };
+}
+
+/**
  * Spread the aggregated "Stockage Cold Archive" bill line over the archived
  * buckets, pro rata of their stored volume.
  *
@@ -959,9 +1055,27 @@ const cloudDetailOps = {
     return stmt.run({ plan_code: null, ...instance });
   },
 
-  getInstancesByProject: (projectId) => {
+  // Instances of a project. With a period, each one carries its billed cost;
+  // `cost_estimated` marks the ones whose cost is a share of an aggregated
+  // hourly line rather than a figure billed under their own id.
+  getInstancesByProject: (projectId, fromDate, toDate) => {
     const db = getDb();
-    return db.prepare('SELECT * FROM cloud_instances WHERE project_id = ? ORDER BY name').all(projectId);
+    const instances = db.prepare(
+      'SELECT * FROM cloud_instances WHERE project_id = ? ORDER BY name'
+    ).all(projectId);
+
+    if (!fromDate || !toDate) return instances;
+
+    const { costs } = computeInstanceCosts(db, projectId, fromDate, toDate);
+    return instances.map(i => {
+      const cost = costs.get(i.id);
+      return {
+        ...i,
+        // null, not 0: no billed line at all is not the same as costing nothing
+        total: cost ? cost.total : null,
+        cost_estimated: cost ? cost.estimated : false
+      };
+    });
   },
 
   insertQuota: (quota) => {
@@ -1088,6 +1202,10 @@ const cloudDetailOps = {
           OR LOWER(description) LIKE '%forfait mensuel%'
           OR LOWER(description) LIKE '%prorata%'
         )
+        -- "Savings plan ... pour 3 instance(s) c3-4" matches '%instance%' but is
+        -- prepaid compute, not an instance line: it belongs to the savings plan
+        -- panel and would otherwise double-count against the per-instance costs.
+        AND LOWER(description) NOT LIKE 'savings plan%'
     `).get(projectId, fromDate, toDate);
   },
 

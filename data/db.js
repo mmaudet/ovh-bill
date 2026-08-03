@@ -734,24 +734,28 @@ const inventoryOps = {
         AND (LOWER(description) LIKE '%kubernetes%' OR LOWER(description) LIKE '%kube%' OR LOWER(description) LIKE '%k8s%')
     `).get(fromDate, toDate);
 
-    // Count S3/Object Storage buckets - count unique bucket storage entries (not bandwidth)
-    // Patterns: "Stockage Standard - Bucket xxx", "Stockage High Performance - Bucket xxx"
-    const s3 = db.prepare(`
-      SELECT COUNT(*) as count, ROUND(SUM(total_price), 2) as total
-      FROM (
-        SELECT description, SUM(total_price) as total_price
-        FROM bill_details d
-        JOIN bills b ON d.bill_id = b.id
-        WHERE b.date >= ? AND b.date <= ?
-          AND (
-            (LOWER(description) LIKE 'stockage standard - bucket%' 
-             OR LOWER(description) LIKE 'stockage high performance - bucket%'
-             OR LOWER(description) LIKE 'stockage standard infrequent%bucket%')
-            AND LOWER(description) NOT LIKE '%bande passante%'
-          )
-        GROUP BY description
-      )
-    `).get(fromDate, toDate);
+    // Count object storage buckets from the imported inventory (buckets that exist
+    // right now, including the ones that cost nothing over the period). Falls back
+    // to the billing-derived count when the inventory has never been imported.
+    let s3 = db.prepare('SELECT COUNT(*) as count FROM object_storage_buckets').get();
+    if (!s3?.count) {
+      s3 = db.prepare(`
+        SELECT COUNT(*) as count
+        FROM (
+          SELECT description
+          FROM bill_details d
+          JOIN bills b ON d.bill_id = b.id
+          WHERE b.date >= ? AND b.date <= ?
+            AND (
+              (LOWER(description) LIKE 'stockage standard - bucket%'
+               OR LOWER(description) LIKE 'stockage high performance - bucket%'
+               OR LOWER(description) LIKE 'stockage standard infrequent%bucket%')
+              AND LOWER(description) NOT LIKE '%bande passante%'
+            )
+          GROUP BY description
+        )
+      `).get(fromDate, toDate);
+    }
     
     // Total cost for all object storage (including bandwidth, archives)
     const s3Total = db.prepare(`
@@ -765,6 +769,7 @@ const inventoryOps = {
           OR LOWER(description) LIKE '%stockage standard infrequent%bucket%'
           OR LOWER(description) LIKE '%stockage d''objects%'
           OR LOWER(description) LIKE '%public cloud archive%'
+          OR LOWER(description) LIKE 'stockage cold archive%'
         )
     `).get(fromDate, toDate);
 
@@ -840,6 +845,71 @@ const inventoryOps = {
   }
 };
 
+/**
+ * Spread the aggregated "Stockage Cold Archive" bill line over the archived
+ * buckets, pro rata of their stored volume.
+ *
+ * OVH bills archived buckets on a single line that carries no bucket name, so
+ * there is no exact per-bucket figure to read. Every archived byte is charged
+ * at the same rate, which makes the volume split accurate up to intra-month
+ * volume changes. Buckets that are still archiving keep their own named line
+ * for the part that has not moved to the archive tier yet, so they are left
+ * out of the split even though a fraction of their data is already archived.
+ *
+ * Rows that receive a share are flagged `allocated` so the UI can show the
+ * amount as an estimate rather than a billed figure.
+ */
+function allocateColdArchive(db, rows, projectId, fromDate, toDate) {
+  const coldArchive = db.prepare(`
+    SELECT ROUND(SUM(d.total_price), 2) as total
+    FROM bill_details d
+    JOIN bills b ON d.bill_id = b.id
+    WHERE d.project_id = ?
+      AND b.date >= ? AND b.date <= ?
+      AND LOWER(d.description) LIKE 'stockage cold archive%'
+  `).get(projectId, fromDate, toDate);
+
+  const coldArchiveTotal = coldArchive?.total || 0;
+  if (coldArchiveTotal <= 0) return;
+
+  const archived = rows.filter(r => r.status === 'archived' && r.objects_size > 0);
+  const archivedSize = archived.reduce((sum, r) => sum + r.objects_size, 0);
+
+  // No inventory to spread it over: keep the bill line visible on its own row
+  // so the panel total still matches the bill.
+  if (!archivedSize) {
+    rows.push({
+      name: 'Stockage Cold Archive',
+      region: null,
+      storage_class: 'Cold Archive',
+      status: null,
+      objects_count: null,
+      objects_size: null,
+      created_at: null,
+      total: coldArchiveTotal,
+      in_inventory: 0,
+      allocated: true
+    });
+    return;
+  }
+
+  let distributed = 0;
+  for (const row of archived) {
+    const share = Math.round(coldArchiveTotal * (row.objects_size / archivedSize) * 100) / 100;
+    row.total = Math.round((row.total + share) * 100) / 100;
+    row.allocated = true;
+    distributed += share;
+  }
+
+  // Give the rounding residual to the largest bucket so the rows still add up
+  // to the billed amount.
+  const residual = Math.round((coldArchiveTotal - distributed) * 100) / 100;
+  if (residual !== 0) {
+    const largest = archived.reduce((a, b) => (b.objects_size > a.objects_size ? b : a));
+    largest.total = Math.round((largest.total + residual) * 100) / 100;
+  }
+}
+
 // Cloud detail operations (Phase 4)
 const cloudDetailOps = {
   insertConsumption: (entry) => {
@@ -909,43 +979,91 @@ const cloudDetailOps = {
     `).all(projectId, projectId);
   },
 
-  // Get bucket details for a project
+  // Get bucket details for a project.
+  //
+  // The list comes from the imported inventory (object_storage_buckets), so a
+  // bucket with no cost over the period is still returned. Costs come from the
+  // bill lines, matched on the bucket name + region parsed out of the French
+  // description ("Stockage Standard - Bucket mybucket sur la région gra").
+  // Buckets that are billed but absent from the inventory (deleted, or
+  // inventory never imported) are appended with in_inventory = 0.
   getBucketsByProject: (projectId, fromDate, toDate) => {
     const db = getDb();
-    // Extraction du nom du bucket et de la classe de stockage depuis la description
-    // Exemples de description :
-    //   "Stockage Standard - Bucket mybucket"
-    //   "Stockage Archive - Bucket mybucket"
-    //   "Stockage Standard Infrequent - Bucket mybucket"
-    // On extrait la classe (avant "- Bucket") et le nom du bucket (après "Bucket ")
-    return db.prepare(`
-      SELECT 
-        TRIM(
-          SUBSTR(description, 
-            INSTR(description, 'Bucket') + 7
-          )
-        ) as bucket,
-        TRIM(
-          REPLACE(
-            SUBSTR(description, 1, INSTR(description, '- Bucket')-1),
-            'Stockage', ''
-          )
-        ) as class,
-        ROUND(SUM(total_price), 2) as total
-      FROM bill_details d
-      JOIN bills b ON d.bill_id = b.id
-      WHERE d.project_id = ?
-        AND b.date >= ? AND b.date <= ?
-        AND (
-          LOWER(description) LIKE 'stockage standard - bucket%'
-          OR LOWER(description) LIKE 'stockage high performance - bucket%'
-          OR LOWER(description) LIKE 'stockage standard infrequent%bucket%'
-          OR LOWER(description) LIKE 'stockage archive - bucket%'
-        )
-        AND LOWER(description) NOT LIKE '%bande passante%'
-      GROUP BY bucket, class
-      ORDER BY total DESC
+
+    const inventory = db.prepare(`
+      SELECT name, region, storage_class, status, objects_count, objects_size, created_at
+      FROM object_storage_buckets
+      WHERE project_id = ?
+    `).all(projectId);
+
+    // ' sur la région ' is 15 characters, '- Bucket ' is 9
+    const costs = db.prepare(`
+      WITH bucket_lines AS (
+        SELECT
+          d.description as description,
+          SUBSTR(d.description, INSTR(d.description, '- Bucket ') + 9) as tail,
+          d.total_price as price
+        FROM bill_details d
+        JOIN bills b ON d.bill_id = b.id
+        WHERE d.project_id = ?
+          AND b.date >= ? AND b.date <= ?
+          AND d.description LIKE '%- Bucket %'
+      )
+      SELECT
+        CASE WHEN INSTR(tail, ' sur la région ') > 0
+             THEN SUBSTR(tail, 1, INSTR(tail, ' sur la région ') - 1)
+             ELSE TRIM(tail) END as name,
+        CASE WHEN INSTR(tail, ' sur la région ') > 0
+             THEN TRIM(SUBSTR(tail, INSTR(tail, ' sur la région ') + 15))
+             ELSE '' END as region,
+        MAX(CASE WHEN description LIKE 'Stockage %'
+                 THEN TRIM(SUBSTR(description, 10, INSTR(description, '- Bucket') - 10)) END) as billed_class,
+        ROUND(SUM(price), 2) as total
+      FROM bucket_lines
+      GROUP BY name, region
     `).all(projectId, fromDate, toDate);
+
+    const key = (name, region) => `${(name || '').toLowerCase()}|${(region || '').toLowerCase()}`;
+    const costByBucket = new Map(costs.map(c => [key(c.name, c.region), c]));
+
+    const rows = inventory.map(b => {
+      const cost = costByBucket.get(key(b.name, b.region));
+      if (cost) costByBucket.delete(key(b.name, b.region));
+      return {
+        name: b.name,
+        region: b.region,
+        storage_class: b.storage_class || cost?.billed_class || null,
+        status: b.status,
+        objects_count: b.objects_count,
+        objects_size: b.objects_size,
+        created_at: b.created_at,
+        total: cost?.total || 0,
+        in_inventory: 1,
+        allocated: false
+      };
+    });
+
+    // Billed but not in the inventory: deleted buckets, or inventory not imported yet.
+    // 'NoSuchBucket_error' is an OVH placeholder on bandwidth lines, not a bucket.
+    for (const cost of costByBucket.values()) {
+      if (!cost.name || cost.name === 'NoSuchBucket_error') continue;
+      rows.push({
+        name: cost.name,
+        region: cost.region,
+        storage_class: cost.billed_class || null,
+        status: null,
+        objects_count: null,
+        objects_size: null,
+        created_at: null,
+        total: cost.total,
+        in_inventory: 0,
+        allocated: false
+      });
+    }
+
+    allocateColdArchive(db, rows, projectId, fromDate, toDate);
+
+    return rows.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
   },
 
   // Get instance consumption total for a project
@@ -963,6 +1081,24 @@ const cloudDetailOps = {
           OR LOWER(description) LIKE '%prorata%'
         )
     `).get(projectId, fromDate, toDate);
+  },
+
+  upsertBucket: (bucket) => {
+    const db = getDb();
+    const stmt = db.prepare(`
+      INSERT INTO object_storage_buckets (id, project_id, name, region, storage_class, status, objects_count, objects_size, created_at, imported_at)
+      VALUES (@id, @project_id, @name, @region, @storage_class, @status, @objects_count, @objects_size, @created_at, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        name = @name, region = @region, storage_class = @storage_class, status = @status,
+        objects_count = @objects_count, objects_size = @objects_size, created_at = @created_at,
+        imported_at = CURRENT_TIMESTAMP
+    `);
+    return stmt.run(bucket);
+  },
+
+  clearBucketsByProject: (projectId) => {
+    const db = getDb();
+    db.prepare('DELETE FROM object_storage_buckets WHERE project_id = ?').run(projectId);
   },
 
   clearByProject: (projectId) => {
@@ -1123,6 +1259,7 @@ function clearAll() {
   db.exec('DELETE FROM project_consumption');
   db.exec('DELETE FROM cloud_instances');
   db.exec('DELETE FROM project_quotas');
+  db.exec('DELETE FROM object_storage_buckets');
   db.exec('DELETE FROM bills');
   db.exec('DELETE FROM projects');
   // Optionnel : vider aussi les autres tables annexes si besoin

@@ -1192,10 +1192,20 @@ function registerRoutes() {
       const validation = validateDateRange(from, to);
       if (!validation.valid) return res.status(400).json({ error: validation.error });
       const buckets = db.cloudDetails.getBucketsByProject(req.params.id, from, to);
-      // La requête SQL fournit déjà bucket (nom), class (type), total
+      // type is null when the class is unknown (bucket gone, or inventory not
+      // imported). Do not guess a class here, the UI shows it as unknown.
       const result = buckets.map(b => ({
-        name: b.bucket,
-        type: b.class || 'Standard',
+        name: b.name,
+        type: b.storage_class,
+        region: b.region,
+        status: b.status,
+        objectsCount: b.objects_count,
+        objectsSize: b.objects_size,
+        createdAt: b.created_at,
+        inInventory: b.in_inventory === 1,
+        // true when the cost is a share of an aggregated bill line, not a
+        // figure billed under this bucket's name (Cold Archive)
+        allocated: b.allocated === true,
         total: b.total
       }));
       res.json(result);

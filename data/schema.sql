@@ -225,3 +225,22 @@ CREATE TABLE IF NOT EXISTS project_quotas (
 );
 
 CREATE INDEX IF NOT EXISTS idx_project_quotas_project ON project_quotas(project_id);
+
+-- Object storage buckets (S3 + Cold Archive), imported from the OVH API.
+-- Unlike the billing-derived view, this is a live inventory: buckets with no
+-- cost in the selected period are still listed.
+CREATE TABLE IF NOT EXISTS object_storage_buckets (
+  id TEXT PRIMARY KEY,              -- projectId:region:name
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  region TEXT,
+  storage_class TEXT,               -- 'Standard', 'High Performance', 'Standard IA', 'Cold Archive'
+  status TEXT,                      -- Cold Archive only: 'none', 'archived', ...
+  objects_count INTEGER,
+  objects_size REAL,                -- bytes
+  created_at DATETIME,
+  imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_storage_buckets_project ON object_storage_buckets(project_id);

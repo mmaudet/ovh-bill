@@ -79,6 +79,16 @@ export default function Dashboard() {
   const fmt = (value) => formatCurrency(value, language);
   const locale = language === 'en' ? 'en-US' : 'fr-FR';
 
+  // Human-readable byte size (decimal units, like the OVH manager)
+  const fmtBytes = (bytes) => {
+    if (bytes === null || bytes === undefined) return '-';
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.min(Math.floor(Math.log10(bytes) / 3), units.length - 1);
+    const value = bytes / Math.pow(1000, i);
+    return `${value.toFixed(value < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+  };
+
   // Sort projects helper
   const sortProjects = (projects, sortConfig) => {
     if (!projects) return [];
@@ -1593,31 +1603,55 @@ export default function Dashboard() {
                                             {fmt(projectBuckets.reduce((sum, b) => sum + (b.total || 0), 0))}€
                                           </span>
                                         </h4>
-                                        <div className="overflow-y-auto max-h-52 bg-white rounded-lg">
+                                        {/* ~11 rows before scrolling */}
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
                                           <table className="w-full text-sm">
                                             <thead>
                                               <tr className="border-b bg-gray-50">
                                                 <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
                                                 <th className="p-2 text-left font-medium">Type</th>
                                                 <th className="p-2 text-left font-medium">{t('region')}</th>
+                                                <th className="p-2 text-right font-medium">{language === 'en' ? 'Size' : 'Taille'}</th>
                                                 <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
                                               </tr>
                                             </thead>
                                             <tbody>
                                               {[...projectBuckets].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base' })).map((bucket, i) => (
-                                                <tr key={i} className="border-b hover:bg-gray-50">
-                                                  <td className="p-2 font-medium text-xs truncate max-w-[150px]" title={bucket.name}>{bucket.name}</td>
+                                                <tr key={i} className={`border-b hover:bg-gray-50 ${bucket.inInventory === false ? 'opacity-60' : ''}`}>
+                                                  <td className="p-2 font-medium text-xs truncate max-w-[150px]" title={bucket.name}>
+                                                    {bucket.name}
+                                                    {bucket.inInventory === false && (
+                                                      <span className="ml-1 text-gray-400" title={language === 'en' ? 'Billed but no longer present' : 'Facturé mais absent de l\'inventaire'}>†</span>
+                                                    )}
+                                                  </td>
                                                   <td className="p-2 text-xs">
                                                     <span className={`px-1.5 py-0.5 rounded text-xs ${
                                                       bucket.type === 'High Performance' ? 'bg-orange-100 text-orange-700' :
-                                                      bucket.type === 'Infrequent Access' ? 'bg-blue-100 text-blue-700' :
+                                                      bucket.type === 'Standard IA' ? 'bg-blue-100 text-blue-700' :
+                                                      bucket.type === 'Cold Archive' ? 'bg-purple-100 text-purple-700' :
                                                       'bg-gray-100 text-gray-700'
                                                     }`}>
-                                                      {bucket.type}
+                                                      {bucket.type || (language === 'en' ? 'Unknown' : 'Inconnu')}
                                                     </span>
+                                                    {bucket.status && bucket.status !== 'none' && (
+                                                      <span className="ml-1 px-1.5 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700">
+                                                        {bucket.status}
+                                                      </span>
+                                                    )}
                                                   </td>
                                                   <td className="p-2 text-xs">{bucket.region}</td>
-                                                  <td className="p-2 text-right font-medium text-xs">{fmt(bucket.total)}€</td>
+                                                  <td className="p-2 text-right text-xs">{fmtBytes(bucket.objectsSize)}</td>
+                                                  <td
+                                                    className="p-2 text-right font-medium text-xs"
+                                                    title={bucket.allocated
+                                                      ? (language === 'en'
+                                                        ? 'Share of the aggregated "Stockage Cold Archive" bill line, pro rata of stored volume'
+                                                        : 'Quote-part de la ligne agrégée « Stockage Cold Archive », au prorata du volume stocké')
+                                                      : undefined}
+                                                  >
+                                                    {bucket.allocated && <span className="text-gray-400">~</span>}
+                                                    {fmt(bucket.total)}€
+                                                  </td>
                                                 </tr>
                                               ))}
                                             </tbody>

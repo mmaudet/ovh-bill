@@ -12,11 +12,15 @@ import {
   fetchInventoryVps, fetchInventoryStorage, fetchExpiringServices,
   fetchByResourceType, fetchResourceTypeDetails, fetchProjectsEnriched, fetchProjectConsumption,
   fetchProjectInstances, fetchProjectQuotas, fetchGpuSummary, fetchPublicCloudStats, fetchBackupStats,
-  fetchProjectBuckets, fetchProjectInstanceTotal
+  fetchProjectBuckets, fetchProjectInstanceTotal,
+  fetchProjectVolumes, fetchProjectSnapshots, fetchProjectSavingsPlans
 } from '../services/api';
 import { useLanguage } from '../hooks/useLanguage.jsx';
 import Logo from '../components/Logo';
 import Accordion from '../components/Accordion.jsx';
+import Modal from '../components/Modal.jsx';
+import TableActions from '../components/TableActions.jsx';
+import { downloadCSV } from '../utils/csv.js';
 import ProjectProductComparison from './ProjectProductComparison.jsx';
 
 // Format currency based on language
@@ -61,6 +65,363 @@ const generateMarkdownReport = (summary, byService, byProject, selectedMonth, la
   return md;
 };
 
+// Bucket table, shared by the inline panel and the "show all" modal.
+// Sorted by name so the list stays stable across period changes.
+const BucketsTable = ({ buckets, language, t, fmt, fmtBytes }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
+        <th className="p-2 text-left font-medium">Type</th>
+        <th className="p-2 text-left font-medium">{t('region')}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Size' : 'Taille'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {sortBucketsByName(buckets).map((bucket, i) => (
+        <tr key={i} className={`border-b hover:bg-gray-50 ${bucket.inInventory === false ? 'opacity-60' : ''}`}>
+          <td className="p-2 font-medium text-xs truncate max-w-[150px]" title={bucket.name}>
+            {bucket.name}
+            {bucket.inInventory === false && (
+              <span className="ml-1 text-gray-400" title={language === 'en' ? 'Billed but no longer present' : 'Facturé mais absent de l\'inventaire'}>†</span>
+            )}
+          </td>
+          <td className="p-2 text-xs">
+            <span className={`px-1.5 py-0.5 rounded text-xs ${
+              bucket.type === 'High Performance' ? 'bg-orange-100 text-orange-700' :
+              bucket.type === 'Standard IA' ? 'bg-blue-100 text-blue-700' :
+              bucket.type === 'Cold Archive' ? 'bg-purple-100 text-purple-700' :
+              bucket.type === 'Public Cloud Archive' ? 'bg-indigo-100 text-indigo-700' :
+              bucket.type === 'Swift' ? 'bg-sky-100 text-sky-700' :
+              'bg-gray-100 text-gray-700'
+            }`}>
+              {bucket.type || (language === 'en' ? 'Unknown' : 'Inconnu')}
+            </span>
+            {bucket.status && bucket.status !== 'none' && (
+              <span className="ml-1 px-1.5 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700">
+                {bucket.status}
+              </span>
+            )}
+          </td>
+          <td className="p-2 text-xs">{bucket.region}</td>
+          <td className="p-2 text-right text-xs">{fmtBytes(bucket.objectsSize)}</td>
+          <td
+            className="p-2 text-right font-medium text-xs"
+            title={bucket.allocated
+              ? (language === 'en'
+                ? 'Share of the aggregated "Stockage Cold Archive" bill line, pro rata of stored volume'
+                : 'Quote-part de la ligne agrégée « Stockage Cold Archive », au prorata du volume stocké')
+              : undefined}
+          >
+            {bucket.allocated && <span className="text-gray-400">~</span>}
+            {fmt(bucket.total)}€
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+// Column definitions for the bucket CSV export
+const bucketCsvColumns = (language) => [
+  { key: 'name', label: language === 'en' ? 'Name' : 'Nom' },
+  { key: 'type', label: 'Type' },
+  { key: 'status', label: language === 'en' ? 'Status' : 'Statut' },
+  { key: 'region', label: language === 'en' ? 'Region' : 'Région' },
+  { key: 'objectsCount', label: language === 'en' ? 'Objects' : 'Objets' },
+  { key: 'objectsSize', label: language === 'en' ? 'Size (bytes)' : 'Taille (octets)' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' },
+  { key: 'allocated', label: language === 'en' ? 'Estimated' : 'Estimé' },
+  { key: 'inInventory', label: language === 'en' ? 'In inventory' : 'Dans l\'inventaire' },
+  { key: 'createdAt', label: language === 'en' ? 'Created at' : 'Créé le' }
+];
+
+// Shown on every amount that is a share of an aggregated bill line rather than
+// a figure billed for that single resource.
+const PRO_RATA_HINT = {
+  fr: 'Quote-part d\'une ligne de facture agrégée par région, au prorata de la taille',
+  en: 'Share of a bill line aggregated per region, pro rata of the size'
+};
+
+const sortBucketsByName = (buckets) =>
+  [...buckets].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base' }));
+
+// Savings plans of a project, read from the bills: there is no savings plan
+// route under /cloud/project in the v6 API.
+const SavingsPlansTable = ({ plans, language, fmt }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Plan' : 'Plan'}</th>
+        <th className="p-2 text-left font-medium">Flavor</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Covered' : 'Couvert'}</th>
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Last billed' : 'Dernière facture'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {plans.map((plan, i) => {
+        const over = plan.inventory !== null && plan.covered > plan.inventory;
+        return (
+          <tr key={plan.id || i} className="border-b hover:bg-gray-50">
+            <td className="p-2 font-medium text-xs truncate max-w-[220px]" title={plan.id}>{plan.id}</td>
+            <td className="p-2 text-xs">{plan.flavor}</td>
+            <td className="p-2 text-right text-xs">
+              <span
+                className={`px-1.5 py-0.5 rounded ${over ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}
+                title={over
+                  ? (language === 'en'
+                    ? 'The plan pays for more instances than the project runs'
+                    : 'Le plan paie plus d\'instances que le projet n\'en fait tourner')
+                  : (language === 'en'
+                    ? 'Instances paid by the plan / instances of that flavor in the inventory'
+                    : 'Instances payées par le plan / instances de ce flavor dans l\'inventaire')}
+              >
+                {plan.covered}{plan.inventory !== null ? ` / ${plan.inventory}` : ''}
+              </span>
+            </td>
+            <td className="p-2 text-xs text-gray-500">{plan.lastDate || '-'}</td>
+            <td className="p-2 text-right font-medium text-xs">{fmt(plan.total)}€</td>
+          </tr>
+        );
+      })}
+    </tbody>
+  </table>
+);
+
+const savingsPlanCsvColumns = (language) => [
+  { key: 'id', label: 'Plan' },
+  { key: 'flavor', label: 'Flavor' },
+  { key: 'covered', label: language === 'en' ? 'Instances covered' : 'Instances couvertes' },
+  { key: 'inventory', label: language === 'en' ? 'Instances in inventory' : 'Instances en inventaire' },
+  { key: 'duration', label: language === 'en' ? 'Duration' : 'Durée' },
+  { key: 'months', label: language === 'en' ? 'Billed months' : 'Mois facturés' },
+  { key: 'firstDate', label: language === 'en' ? 'First billed' : 'Première facture' },
+  { key: 'lastDate', label: language === 'en' ? 'Last billed' : 'Dernière facture' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' }
+];
+
+// Block storage volumes of a project, shared by the inline panel and its modal.
+const VolumesTable = ({ volumes, language, t, fmt }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
+        <th className="p-2 text-left font-medium">Type</th>
+        <th className="p-2 text-left font-medium">{t('region')}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Size' : 'Taille'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {volumes.map((v, i) => (
+        <tr key={v.id || i} className="border-b hover:bg-gray-50">
+          <td className="p-2 font-medium text-xs truncate max-w-[200px]" title={v.name}>
+            {v.name}
+            {v.attachedTo && v.attachedTo.length === 0 && (
+              <span
+                className="ml-1 px-1.5 py-0.5 rounded text-xs bg-red-100 text-red-700"
+                title={language === 'en' ? 'Not attached to any instance' : "Attaché à aucune instance"}
+              >
+                {language === 'en' ? 'detached' : 'détaché'}
+              </span>
+            )}
+          </td>
+          <td className="p-2 text-xs">
+            <span className={`px-1.5 py-0.5 rounded text-xs ${v.type === 'high-speed' ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-700'}`}>
+              {v.type}
+            </span>
+          </td>
+          <td className="p-2 text-xs">{v.region}</td>
+          <td className="p-2 text-right text-xs">{v.sizeGb !== null && v.sizeGb !== undefined ? `${Math.round(v.sizeGb)} GB` : '-'}</td>
+          <td className="p-2 text-right font-medium text-xs" title={v.allocated ? PRO_RATA_HINT[language] : undefined}>
+            {v.allocated && <span className="text-gray-400">~</span>}
+            {fmt(v.total)}€
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+// Instance snapshots of a project, shared by the inline panel and its modal.
+const SnapshotsTable = ({ snapshots, language, t, fmt, locale }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
+        <th className="p-2 text-left font-medium">{t('region')}</th>
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Created at' : 'Créé le'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Size' : 'Taille'}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {snapshots.map((sn, i) => (
+        <tr key={sn.id || i} className="border-b hover:bg-gray-50">
+          <td className="p-2 font-medium text-xs truncate max-w-[220px]" title={sn.name}>{sn.name}</td>
+          <td className="p-2 text-xs">{sn.region}</td>
+          <td className="p-2 text-xs text-gray-500">
+            {sn.createdAt ? new Date(sn.createdAt).toLocaleDateString(locale) : '-'}
+          </td>
+          <td className="p-2 text-right text-xs">{sn.sizeGb !== null && sn.sizeGb !== undefined ? `${Math.round(sn.sizeGb)} GB` : '-'}</td>
+          <td className="p-2 text-right font-medium text-xs" title={sn.allocated ? PRO_RATA_HINT[language] : undefined}>
+            {sn.allocated && <span className="text-gray-400">~</span>}
+            {fmt(sn.total)}€
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+const volumeCsvColumns = (language) => [
+  { key: 'name', label: language === 'en' ? 'Name' : 'Nom' },
+  { key: 'type', label: 'Type' },
+  { key: 'region', label: language === 'en' ? 'Region' : 'Région' },
+  { key: 'sizeGb', label: language === 'en' ? 'Size (GB)' : 'Taille (Go)' },
+  { key: 'status', label: language === 'en' ? 'Status' : 'Statut' },
+  { key: 'attached', label: language === 'en' ? 'Attached' : 'Attaché' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' },
+  { key: 'allocated', label: language === 'en' ? 'Estimated' : 'Estimé' },
+  { key: 'createdAt', label: language === 'en' ? 'Created at' : 'Créé le' },
+  { key: 'id', label: 'ID' }
+];
+
+const volumeCsvRows = (volumes) =>
+  volumes.map(v => ({ ...v, attached: (v.attachedTo || []).join(' ') }));
+
+const snapshotCsvColumns = (language) => [
+  { key: 'name', label: language === 'en' ? 'Name' : 'Nom' },
+  { key: 'region', label: language === 'en' ? 'Region' : 'Région' },
+  { key: 'sizeGb', label: language === 'en' ? 'Size (GB)' : 'Taille (Go)' },
+  { key: 'visibility', label: language === 'en' ? 'Visibility' : 'Visibilité' },
+  { key: 'osType', label: 'OS' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' },
+  { key: 'allocated', label: language === 'en' ? 'Estimated' : 'Estimé' },
+  { key: 'createdAt', label: language === 'en' ? 'Created at' : 'Créé le' },
+  { key: 'id', label: 'ID' }
+];
+
+// Cloud instances of a project, shared by the inline panel and its modal.
+const InstancesTable = ({ instances, language, t, fmt }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
+        <th className="p-2 text-left font-medium">Flavor</th>
+        <th className="p-2 text-left font-medium">{t('region')}</th>
+        <th className="p-2 text-left font-medium">{t('state')}</th>
+        <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {[...instances].sort((a, b) => (b.total || 0) - (a.total || 0)).map(inst => {
+        const pc = inst.plan_code || inst.flavor || '';
+        const isGpu = /^(l4-|l40s-|a100-|h100-|v100-|t1-|t2-)/.test(pc);
+        return (
+          <tr key={inst.id} className={`border-b hover:bg-gray-50 ${isGpu ? 'bg-purple-50' : ''}`}>
+            <td className="p-2 font-medium text-xs">{inst.name || inst.id}</td>
+            <td className="p-2 text-xs">
+              {isGpu ? (
+                <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded font-medium">{pc}</span>
+              ) : (
+                pc
+              )}
+            </td>
+            <td className="p-2 text-xs">{inst.region}</td>
+            <td className="p-2">
+              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${inst.status === 'ACTIVE' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
+                {inst.status}
+              </span>
+            </td>
+            <td
+              className="p-2 text-right font-medium text-xs"
+              title={inst.cost_estimated
+                ? (language === 'en'
+                  ? 'Even share of the aggregated hourly line for this flavor: the API exposes no per-instance runtime'
+                  : 'Part égale de la ligne horaire agrégée de ce flavor : l\'API n\'expose pas le temps de fonctionnement par instance')
+                : undefined}
+            >
+              {inst.total === null || inst.total === undefined ? (
+                <span className="text-gray-300">-</span>
+              ) : (
+                <>
+                  {inst.cost_estimated && <span className="text-gray-400">~</span>}
+                  {fmt(inst.total)}€
+                </>
+              )}
+            </td>
+          </tr>
+        );
+      })}
+    </tbody>
+  </table>
+);
+
+const instanceCsvColumns = (language) => [
+  { key: 'name', label: language === 'en' ? 'Name' : 'Nom' },
+  { key: 'flavor_display', label: 'Flavor' },
+  { key: 'region', label: language === 'en' ? 'Region' : 'Région' },
+  { key: 'status', label: language === 'en' ? 'State' : 'État' },
+  { key: 'total', label: language === 'en' ? 'Cost (EUR)' : 'Coût (EUR)' },
+  { key: 'cost_estimated', label: language === 'en' ? 'Estimated' : 'Estimé' },
+  { key: 'monthly_billing', label: language === 'en' ? 'Monthly billing' : 'Facturation mensuelle' },
+  { key: 'created_at', label: language === 'en' ? 'Created at' : 'Créé le' },
+  { key: 'id', label: 'ID' }
+];
+
+// The displayed flavor falls back to the raw flavor id when planCode is missing
+const instanceCsvRows = (instances) =>
+  instances.map(i => ({ ...i, flavor_display: i.plan_code || i.flavor || '' }));
+
+// Dedicated servers inventory, shared by the inline panel and its modal.
+const ServersTable = ({ servers, t }) => (
+  <table className="w-full text-sm">
+    <thead>
+      <tr className="border-b bg-gray-50">
+        <th className="p-3 text-left font-medium">ID</th>
+        <th className="p-3 text-left font-medium">{t('datacenter')}</th>
+        <th className="p-3 text-left font-medium">CPU</th>
+        <th className="p-3 text-left font-medium">{t('ram')}</th>
+        <th className="p-3 text-left font-medium">{t('state')}</th>
+        <th className="p-3 text-left font-medium">{t('expirationDate')}</th>
+        <th className="p-3 text-left font-medium">{t('renewal')}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {servers.map(s => (
+        <tr key={s.id} className="border-b hover:bg-gray-50">
+          <td className="p-3 font-medium">{s.display_name || s.id}</td>
+          <td className="p-3">{s.datacenter}</td>
+          <td className="p-3">{s.cpu}</td>
+          <td className="p-3">{s.ram_size ? `${Math.round(s.ram_size / 1024)} GB` : '-'}</td>
+          <td className="p-3">
+            <span className={`px-2 py-0.5 rounded text-xs font-medium ${s.state === 'ok' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+              {s.state}
+            </span>
+          </td>
+          <td className="p-3">{s.expiration_date || '-'}</td>
+          <td className="p-3">{s.renewal_type || '-'}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+);
+
+const serverCsvColumns = (language) => [
+  { key: 'display_name', label: language === 'en' ? 'Name' : 'Nom' },
+  { key: 'id', label: 'ID' },
+  { key: 'datacenter', label: language === 'en' ? 'Datacenter' : 'Datacentre' },
+  { key: 'cpu', label: 'CPU' },
+  { key: 'ram_size', label: 'RAM (MB)' },
+  { key: 'os', label: 'OS' },
+  { key: 'state', label: language === 'en' ? 'State' : 'État' },
+  { key: 'expiration_date', label: language === 'en' ? 'Expiration date' : 'Date d\'expiration' },
+  { key: 'renewal_type', label: language === 'en' ? 'Renewal' : 'Renouvellement' }
+];
+
 export default function Dashboard() {
   const { language, setLanguage, t } = useLanguage();
   const [selectedMonth, setSelectedMonth] = useState(null);
@@ -74,10 +435,26 @@ export default function Dashboard() {
   const [syncWarningDismissed, setSyncWarningDismissed] = useState(false);
   const [selectedProject, setSelectedProject] = useState(null);
   const [selectedResourceType, setSelectedResourceType] = useState(null);
+  const [showAllBuckets, setShowAllBuckets] = useState(false);
+  const [showAllInstances, setShowAllInstances] = useState(false);
+  const [showAllServers, setShowAllServers] = useState(false);
+  const [showAllVolumes, setShowAllVolumes] = useState(false);
+  const [showAllSnapshots, setShowAllSnapshots] = useState(false);
+  const [showAllSavingsPlans, setShowAllSavingsPlans] = useState(false);
 
   // Helper to format currency with current language
   const fmt = (value) => formatCurrency(value, language);
   const locale = language === 'en' ? 'en-US' : 'fr-FR';
+
+  // Human-readable byte size (decimal units, like the OVH manager)
+  const fmtBytes = (bytes) => {
+    if (bytes === null || bytes === undefined) return '-';
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.min(Math.floor(Math.log10(bytes) / 3), units.length - 1);
+    const value = bytes / Math.pow(1000, i);
+    return `${value.toFixed(value < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+  };
 
   // Sort projects helper
   const sortProjects = (projects, sortConfig) => {
@@ -324,8 +701,8 @@ export default function Dashboard() {
   });
 
   const { data: projectInstances = [] } = useQuery({
-    queryKey: ['projectInstances', selectedProject?.id],
-    queryFn: () => fetchProjectInstances(selectedProject.id),
+    queryKey: ['projectInstances', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectInstances(selectedProject.id, selectedMonth?.from, selectedMonth?.to),
     enabled: !!selectedProject
   });
 
@@ -336,6 +713,24 @@ export default function Dashboard() {
   });
 
   // Project buckets (filtered by selected month)
+  const { data: projectVolumes = [] } = useQuery({
+    queryKey: ['projectVolumes', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectVolumes(selectedProject.id, selectedMonth.from, selectedMonth.to),
+    enabled: !!selectedProject?.id && !!selectedMonth
+  });
+
+  const { data: projectSnapshots = [] } = useQuery({
+    queryKey: ['projectSnapshots', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectSnapshots(selectedProject.id, selectedMonth.from, selectedMonth.to),
+    enabled: !!selectedProject?.id && !!selectedMonth
+  });
+
+  const { data: projectSavingsPlans = [] } = useQuery({
+    queryKey: ['projectSavingsPlans', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
+    queryFn: () => fetchProjectSavingsPlans(selectedProject.id, selectedMonth.from, selectedMonth.to),
+    enabled: !!selectedProject?.id && !!selectedMonth
+  });
+
   const { data: projectBuckets = [] } = useQuery({
     queryKey: ['projectBuckets', selectedProject?.id, selectedMonth?.from, selectedMonth?.to],
     queryFn: () => fetchProjectBuckets(selectedProject.id, selectedMonth.from, selectedMonth.to),
@@ -1414,6 +1809,9 @@ export default function Dashboard() {
                 <div className="text-3xl font-bold text-indigo-600 mt-2">
                   {projectsEnriched.reduce((sum, p) => sum + (p.instance_count || 0), 0)}
                 </div>
+                {publicCloudStats?.instances?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.instances.total)}€</p>
+                )}
               </div>
               <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
                 <span className="text-gray-500 text-sm">{language === 'en' ? 'GPU Instances' : 'Instances GPU'}</span>
@@ -1431,6 +1829,27 @@ export default function Dashboard() {
                 <div className="text-3xl font-bold text-green-600 mt-2">{publicCloudStats?.objectStorage?.count || 0}</div>
                 {publicCloudStats?.objectStorage?.total > 0 && (
                   <p className="text-xs text-gray-400">{fmt(publicCloudStats.objectStorage.total)}€</p>
+                )}
+              </div>
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+                <span className="text-gray-500 text-sm">{language === 'en' ? 'Volumes' : 'Volumes'}</span>
+                <div className="text-3xl font-bold text-teal-600 mt-2">{publicCloudStats?.volumes?.count || 0}</div>
+                {publicCloudStats?.volumes?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.volumes.total)}€</p>
+                )}
+              </div>
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+                <span className="text-gray-500 text-sm">Snapshots</span>
+                <div className="text-3xl font-bold text-amber-600 mt-2">{publicCloudStats?.snapshots?.count || 0}</div>
+                {publicCloudStats?.snapshots?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.snapshots.total)}€</p>
+                )}
+              </div>
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+                <span className="text-gray-500 text-sm">{language === 'en' ? 'Savings plans' : 'Savings plans'}</span>
+                <div className="text-3xl font-bold text-rose-600 mt-2">{publicCloudStats?.savingsPlans?.count || 0}</div>
+                {publicCloudStats?.savingsPlans?.total > 0 && (
+                  <p className="text-xs text-gray-400">{fmt(publicCloudStats.savingsPlans.total)}€</p>
                 )}
               </div>
               <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
@@ -1534,48 +1953,28 @@ export default function Dashboard() {
 
                                     {/* Instances list */}
                                     <div>
-                                      <h4 className="font-medium text-gray-700 mb-3">
-                                        {t('instances')} ({projectInstances.length})
-                                        {projectInstanceTotal?.total > 0 && (
-                                          <span className="ml-2 text-sm font-normal text-indigo-600">{fmt(projectInstanceTotal.total)}€</span>
+                                      <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                        <span>
+                                          {t('instances')} ({projectInstances.length})
+                                          {projectInstanceTotal?.total > 0 && (
+                                            <span className="ml-2 text-sm font-normal text-indigo-600">{fmt(projectInstanceTotal.total)}€</span>
+                                          )}
+                                        </span>
+                                        {projectInstances.length > 0 && (
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllInstances(true)}
+                                            onExport={() => downloadCSV(
+                                              instanceCsvRows(projectInstances),
+                                              instanceCsvColumns(language),
+                                              `ovh-instances-${selectedProject?.name || 'export'}`
+                                            )}
+                                          />
                                         )}
                                       </h4>
                                       {projectInstances.length > 0 ? (
                                         <div className="overflow-y-auto max-h-52 bg-white rounded-lg">
-                                          <table className="w-full text-sm">
-                                            <thead>
-                                              <tr className="border-b bg-gray-50">
-                                                <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
-                                                <th className="p-2 text-left font-medium">Flavor</th>
-                                                <th className="p-2 text-left font-medium">{t('region')}</th>
-                                                <th className="p-2 text-left font-medium">{t('state')}</th>
-                                              </tr>
-                                            </thead>
-                                            <tbody>
-                                              {projectInstances.map(inst => {
-                                                const pc = inst.plan_code || inst.flavor || '';
-                                                const isGpu = /^(l4-|l40s-|a100-|h100-|v100-|t1-|t2-)/.test(pc);
-                                                return (
-                                                  <tr key={inst.id} className={`border-b hover:bg-gray-50 ${isGpu ? 'bg-purple-50' : ''}`}>
-                                                    <td className="p-2 font-medium text-xs">{inst.name || inst.id}</td>
-                                                    <td className="p-2 text-xs">
-                                                      {isGpu ? (
-                                                        <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded font-medium">{pc}</span>
-                                                      ) : (
-                                                        pc
-                                                      )}
-                                                    </td>
-                                                    <td className="p-2 text-xs">{inst.region}</td>
-                                                    <td className="p-2">
-                                                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${inst.status === 'ACTIVE' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'}`}>
-                                                        {inst.status}
-                                                      </span>
-                                                    </td>
-                                                  </tr>
-                                                );
-                                              })}
-                                            </tbody>
-                                          </table>
+                                          <InstancesTable instances={projectInstances} language={language} t={t} fmt={fmt} />
                                         </div>
                                       ) : (
                                         <div className="flex items-center justify-center h-16 text-gray-400 text-sm">
@@ -1587,41 +1986,104 @@ export default function Dashboard() {
                                     {/* Buckets list */}
                                     {projectBuckets.length > 0 && (
                                       <div className="lg:col-span-2">
-                                        <h4 className="font-medium text-gray-700 mb-3">
-                                          Buckets ({projectBuckets.length})
-                                          <span className="ml-2 text-sm font-normal text-green-600">
-                                            {fmt(projectBuckets.reduce((sum, b) => sum + (b.total || 0), 0))}€
+                                        <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                          <span>
+                                            Buckets ({projectBuckets.length})
+                                            <span className="ml-2 text-sm font-normal text-green-600">
+                                              {fmt(projectBuckets.reduce((sum, b) => sum + (b.total || 0), 0))}€
+                                            </span>
                                           </span>
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllBuckets(true)}
+                                            onExport={() => downloadCSV(
+                                              sortBucketsByName(projectBuckets),
+                                              bucketCsvColumns(language),
+                                              `ovh-buckets-${selectedMonth?.value || 'export'}`
+                                            )}
+                                          />
                                         </h4>
-                                        <div className="overflow-y-auto max-h-52 bg-white rounded-lg">
-                                          <table className="w-full text-sm">
-                                            <thead>
-                                              <tr className="border-b bg-gray-50">
-                                                <th className="p-2 text-left font-medium">{language === 'en' ? 'Name' : 'Nom'}</th>
-                                                <th className="p-2 text-left font-medium">Type</th>
-                                                <th className="p-2 text-left font-medium">{t('region')}</th>
-                                                <th className="p-2 text-right font-medium">{language === 'en' ? 'Cost' : 'Coût'}</th>
-                                              </tr>
-                                            </thead>
-                                            <tbody>
-                                              {[...projectBuckets].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base' })).map((bucket, i) => (
-                                                <tr key={i} className="border-b hover:bg-gray-50">
-                                                  <td className="p-2 font-medium text-xs truncate max-w-[150px]" title={bucket.name}>{bucket.name}</td>
-                                                  <td className="p-2 text-xs">
-                                                    <span className={`px-1.5 py-0.5 rounded text-xs ${
-                                                      bucket.type === 'High Performance' ? 'bg-orange-100 text-orange-700' :
-                                                      bucket.type === 'Infrequent Access' ? 'bg-blue-100 text-blue-700' :
-                                                      'bg-gray-100 text-gray-700'
-                                                    }`}>
-                                                      {bucket.type}
-                                                    </span>
-                                                  </td>
-                                                  <td className="p-2 text-xs">{bucket.region}</td>
-                                                  <td className="p-2 text-right font-medium text-xs">{fmt(bucket.total)}€</td>
-                                                </tr>
-                                              ))}
-                                            </tbody>
-                                          </table>
+                                        {/* ~11 rows before scrolling */}
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
+                                          <BucketsTable buckets={projectBuckets} language={language} t={t} fmt={fmt} fmtBytes={fmtBytes} />
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Volumes */}
+                                    {projectVolumes.length > 0 && (
+                                      <div>
+                                        <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                          <span>
+                                            Volumes ({projectVolumes.length})
+                                            <span className="ml-2 text-sm font-normal text-teal-600">
+                                              {fmt(projectVolumes.reduce((sum, v) => sum + (v.total || 0), 0))}€
+                                            </span>
+                                          </span>
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllVolumes(true)}
+                                            onExport={() => downloadCSV(
+                                              volumeCsvRows(projectVolumes),
+                                              volumeCsvColumns(language),
+                                              `ovh-volumes-${selectedMonth?.value || 'export'}`
+                                            )}
+                                          />
+                                        </h4>
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
+                                          <VolumesTable volumes={projectVolumes} language={language} t={t} fmt={fmt} />
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Snapshots */}
+                                    {projectSnapshots.length > 0 && (
+                                      <div>
+                                        <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                          <span>
+                                            Snapshots ({projectSnapshots.length})
+                                            <span className="ml-2 text-sm font-normal text-amber-600">
+                                              {fmt(projectSnapshots.reduce((sum, sn) => sum + (sn.total || 0), 0))}€
+                                            </span>
+                                          </span>
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllSnapshots(true)}
+                                            onExport={() => downloadCSV(
+                                              projectSnapshots,
+                                              snapshotCsvColumns(language),
+                                              `ovh-snapshots-${selectedMonth?.value || 'export'}`
+                                            )}
+                                          />
+                                        </h4>
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
+                                          <SnapshotsTable snapshots={projectSnapshots} language={language} t={t} fmt={fmt} locale={locale} />
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Savings plans */}
+                                    {projectSavingsPlans.length > 0 && (
+                                      <div className="lg:col-span-2">
+                                        <h4 className="font-medium text-gray-700 mb-3 flex items-center gap-2">
+                                          <span>
+                                            Savings plans ({projectSavingsPlans.length})
+                                            <span className="ml-2 text-sm font-normal text-rose-600">
+                                              {fmt(projectSavingsPlans.reduce((sum, p) => sum + (p.total || 0), 0))}€
+                                            </span>
+                                          </span>
+                                          <TableActions
+                                            language={language}
+                                            onShowAll={() => setShowAllSavingsPlans(true)}
+                                            onExport={() => downloadCSV(
+                                              projectSavingsPlans,
+                                              savingsPlanCsvColumns(language),
+                                              `ovh-savings-plans-${selectedMonth?.value || 'export'}`
+                                            )}
+                                          />
+                                        </h4>
+                                        <div className="overflow-y-auto max-h-[400px] bg-white rounded-lg">
+                                          <SavingsPlansTable plans={projectSavingsPlans} language={language} fmt={fmt} />
                                         </div>
                                       </div>
                                     )}
@@ -1761,38 +2223,17 @@ export default function Dashboard() {
             {/* Dedicated Servers Table */}
             {inventoryServers.length > 0 && (
               <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
-                <h3 className="font-semibold text-gray-900 mb-4">{t('dedicatedServers')}</h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b bg-gray-50">
-                        <th className="p-3 text-left font-medium">ID</th>
-                        <th className="p-3 text-left font-medium">{t('datacenter')}</th>
-                        <th className="p-3 text-left font-medium">CPU</th>
-                        <th className="p-3 text-left font-medium">{t('ram')}</th>
-                        <th className="p-3 text-left font-medium">{t('state')}</th>
-                        <th className="p-3 text-left font-medium">{t('expirationDate')}</th>
-                        <th className="p-3 text-left font-medium">{t('renewal')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {inventoryServers.map(s => (
-                        <tr key={s.id} className="border-b hover:bg-gray-50">
-                          <td className="p-3 font-medium">{s.display_name || s.id}</td>
-                          <td className="p-3">{s.datacenter}</td>
-                          <td className="p-3">{s.cpu}</td>
-                          <td className="p-3">{s.ram_size ? `${Math.round(s.ram_size / 1024)} GB` : '-'}</td>
-                          <td className="p-3">
-                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${s.state === 'ok' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                              {s.state}
-                            </span>
-                          </td>
-                          <td className="p-3">{s.expiration_date || '-'}</td>
-                          <td className="p-3">{s.renewal_type || '-'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <span>{t('dedicatedServers')} ({inventoryServers.length})</span>
+                  <TableActions
+                    language={language}
+                    onShowAll={() => setShowAllServers(true)}
+                    onExport={() => downloadCSV(inventoryServers, serverCsvColumns(language), 'ovh-dedicated-servers')}
+                  />
+                </h3>
+                {/* ~11 rows before scrolling, the full list is one click away */}
+                <div className="overflow-auto max-h-[430px]">
+                  <ServersTable servers={inventoryServers} t={t} />
                 </div>
               </div>
             )}
@@ -1967,6 +2408,159 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      <Modal
+        open={showAllBuckets}
+        onClose={() => setShowAllBuckets(false)}
+        maxWidth="max-w-5xl"
+        title={
+          <>
+            Buckets ({projectBuckets.length})
+            <span className="ml-2 text-sm font-normal text-green-600">
+              {fmt(projectBuckets.reduce((sum, b) => sum + (b.total || 0), 0))}€
+            </span>
+            {selectedMonth?.label && (
+              <span className="ml-2 text-sm font-normal text-gray-400">{selectedMonth.label}</span>
+            )}
+          </>
+        }
+        actions={
+          <button
+            onClick={() => downloadCSV(
+              sortBucketsByName(projectBuckets),
+              bucketCsvColumns(language),
+              `ovh-buckets-${selectedMonth?.value || 'export'}`
+            )}
+            className="px-2 py-0.5 text-xs border border-gray-200 rounded hover:bg-gray-100"
+          >
+            CSV
+          </button>
+        }
+      >
+        <BucketsTable buckets={projectBuckets} language={language} t={t} fmt={fmt} fmtBytes={fmtBytes} />
+      </Modal>
+
+      <Modal
+        open={showAllInstances}
+        onClose={() => setShowAllInstances(false)}
+        maxWidth="max-w-4xl"
+        title={
+          <>
+            {t('instances')} ({projectInstances.length})
+            {projectInstanceTotal?.total > 0 && (
+              <span className="ml-2 text-sm font-normal text-indigo-600">{fmt(projectInstanceTotal.total)}€</span>
+            )}
+            {selectedProject?.name && (
+              <span className="ml-2 text-sm font-normal text-gray-400">{selectedProject.name}</span>
+            )}
+          </>
+        }
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(
+              instanceCsvRows(projectInstances),
+              instanceCsvColumns(language),
+              `ovh-instances-${selectedProject?.name || 'export'}`
+            )}
+          />
+        }
+      >
+        <InstancesTable instances={projectInstances} language={language} t={t} fmt={fmt} />
+      </Modal>
+
+      <Modal
+        open={showAllServers}
+        onClose={() => setShowAllServers(false)}
+        maxWidth="max-w-6xl"
+        title={`${t('dedicatedServers')} (${inventoryServers.length})`}
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(inventoryServers, serverCsvColumns(language), 'ovh-dedicated-servers')}
+          />
+        }
+      >
+        <ServersTable servers={inventoryServers} t={t} />
+      </Modal>
+
+      <Modal
+        open={showAllVolumes}
+        onClose={() => setShowAllVolumes(false)}
+        maxWidth="max-w-5xl"
+        title={
+          <>
+            Volumes ({projectVolumes.length})
+            <span className="ml-2 text-sm font-normal text-teal-600">
+              {fmt(projectVolumes.reduce((sum, v) => sum + (v.total || 0), 0))}€
+            </span>
+          </>
+        }
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(
+              volumeCsvRows(projectVolumes),
+              volumeCsvColumns(language),
+              `ovh-volumes-${selectedMonth?.value || 'export'}`
+            )}
+          />
+        }
+      >
+        <VolumesTable volumes={projectVolumes} language={language} t={t} fmt={fmt} />
+      </Modal>
+
+      <Modal
+        open={showAllSnapshots}
+        onClose={() => setShowAllSnapshots(false)}
+        maxWidth="max-w-5xl"
+        title={
+          <>
+            Snapshots ({projectSnapshots.length})
+            <span className="ml-2 text-sm font-normal text-amber-600">
+              {fmt(projectSnapshots.reduce((sum, sn) => sum + (sn.total || 0), 0))}€
+            </span>
+          </>
+        }
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(
+              projectSnapshots,
+              snapshotCsvColumns(language),
+              `ovh-snapshots-${selectedMonth?.value || 'export'}`
+            )}
+          />
+        }
+      >
+        <SnapshotsTable snapshots={projectSnapshots} language={language} t={t} fmt={fmt} locale={locale} />
+      </Modal>
+
+      <Modal
+        open={showAllSavingsPlans}
+        onClose={() => setShowAllSavingsPlans(false)}
+        maxWidth="max-w-4xl"
+        title={
+          <>
+            Savings plans ({projectSavingsPlans.length})
+            <span className="ml-2 text-sm font-normal text-rose-600">
+              {fmt(projectSavingsPlans.reduce((sum, p) => sum + (p.total || 0), 0))}€
+            </span>
+          </>
+        }
+        actions={
+          <TableActions
+            language={language}
+            onExport={() => downloadCSV(
+              projectSavingsPlans,
+              savingsPlanCsvColumns(language),
+              `ovh-savings-plans-${selectedMonth?.value || 'export'}`
+            )}
+          />
+        }
+      >
+        <SavingsPlansTable plans={projectSavingsPlans} language={language} fmt={fmt} />
+      </Modal>
     </div>
   );
 }

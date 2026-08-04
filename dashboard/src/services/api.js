@@ -147,8 +147,23 @@ export const fetchProjectConsumption = async (projectId, from, to) => {
   return data;
 };
 
-export const fetchProjectInstances = async (projectId) => {
-  const { data } = await api.get(`/projects/${projectId}/instances`);
+export const fetchProjectInstances = async (projectId, from, to) => {
+  const { data } = await api.get(`/projects/${projectId}/instances`, { params: { from, to } });
+  return data;
+};
+
+export const fetchProjectVolumes = async (projectId, from, to) => {
+  const { data } = await api.get(`/projects/${projectId}/volumes`, { params: { from, to } });
+  return data;
+};
+
+export const fetchProjectSnapshots = async (projectId, from, to) => {
+  const { data } = await api.get(`/projects/${projectId}/snapshots`, { params: { from, to } });
+  return data;
+};
+
+export const fetchProjectSavingsPlans = async (projectId, from, to) => {
+  const { data } = await api.get(`/projects/${projectId}/savings-plans`, { params: { from, to } });
   return data;
 };
 

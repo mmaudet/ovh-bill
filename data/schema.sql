@@ -225,3 +225,58 @@ CREATE TABLE IF NOT EXISTS project_quotas (
 );
 
 CREATE INDEX IF NOT EXISTS idx_project_quotas_project ON project_quotas(project_id);
+
+-- Object storage buckets (S3 + Cold Archive), imported from the OVH API.
+-- Unlike the billing-derived view, this is a live inventory: buckets with no
+-- cost in the selected period are still listed.
+CREATE TABLE IF NOT EXISTS object_storage_buckets (
+  id TEXT PRIMARY KEY,              -- projectId:region:name
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  region TEXT,
+  storage_class TEXT,               -- 'Standard', 'High Performance', 'Standard IA', 'Cold Archive'
+  status TEXT,                      -- Cold Archive only: 'none', 'archived', ...
+  objects_count INTEGER,
+  objects_size REAL,                -- bytes
+  created_at DATETIME,
+  imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_storage_buckets_project ON object_storage_buckets(project_id);
+
+-- Block storage volumes attached to (or detached from) cloud instances
+CREATE TABLE IF NOT EXISTS cloud_volumes (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  name TEXT,
+  region TEXT,
+  type TEXT,                        -- 'classic', 'high-speed', ...
+  size_gb REAL,
+  status TEXT,
+  bootable INTEGER DEFAULT 0,
+  attached_to TEXT,                 -- comma-separated instance ids, empty when detached
+  plan_code TEXT,
+  created_at DATETIME,
+  imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cloud_volumes_project ON cloud_volumes(project_id);
+
+-- Instance snapshots (images)
+CREATE TABLE IF NOT EXISTS cloud_snapshots (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  name TEXT,
+  region TEXT,
+  size_gb REAL,
+  status TEXT,
+  visibility TEXT,
+  os_type TEXT,
+  created_at DATETIME,
+  imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cloud_snapshots_project ON cloud_snapshots(project_id);

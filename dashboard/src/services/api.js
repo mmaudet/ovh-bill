@@ -152,6 +152,16 @@ export const fetchProjectInstances = async (projectId) => {
   return data;
 };
 
+export const fetchWebCloudSummary = async (from, to) => {
+  const { data } = await api.get('/web-cloud/summary', { params: { from, to } });
+  return data;
+};
+
+export const fetchWebCloudItems = async (from, to) => {
+  const { data } = await api.get('/web-cloud/items', { params: { from, to } });
+  return data;
+};
+
 export const fetchProjectQuotas = async (projectId) => {
   const { data } = await api.get(`/projects/${projectId}/quotas`);
   return data;
